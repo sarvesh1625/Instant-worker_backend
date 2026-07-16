@@ -9,19 +9,18 @@ const JobSchema = new mongoose.Schema({
   location: {
     city: { type: String, required: true },
     area: String,
-    // GPS coordinates of the actual worksite — kept as plain numbers too
-    // (not just inside `point`) because LiveTrackingMap.jsx and other
-    // existing code reads job.location.lat/lng directly.
     lat:  { type: Number, default: null },
     lng:  { type: Number, default: null },
 
-    // GeoJSON Point — required by MongoDB's 2dsphere index for $geoNear /
-    // $nearSphere radius queries. Derived automatically from lat/lng
-    // whenever they're provided (see jobController.createJob). Coordinates
-    // are [longitude, latitude] — MongoDB's convention, NOT [lat, lng].
+    // FIX: same bug as User.js's worker.location — `default: 'Point'` on
+    // the nested `type` field caused EVERY job to get a half-formed point
+    // (type set, coordinates missing) on save, which broke the 2dsphere
+    // index and threw errors on every applyToJob / accept / start / complete
+    // action, not just job creation. Default removed; see the pre-save
+    // guard below for extra safety on any already-corrupted documents.
     point: {
-      type: { type: String, enum: ['Point'], default: 'Point' },
-      coordinates: { type: [Number], default: undefined }, // [lng, lat]
+      type: { type: String, enum: ['Point'] },
+      coordinates: { type: [Number] },
     },
   },
 
@@ -65,7 +64,16 @@ const JobSchema = new mongoose.Schema({
 
 }, { timestamps: true });
 
-// Enables $geoNear / $nearSphere radius queries on job worksite location.
 JobSchema.index({ 'location.point': '2dsphere' });
+
+// Same safety net as User.js — strip a half-formed point rather than let
+// the whole save fail.
+JobSchema.pre('save', function (next) {
+  const pt = this.location?.point;
+  if (pt && (!Array.isArray(pt.coordinates) || pt.coordinates.length !== 2)) {
+    this.location.point = undefined;
+  }
+  next();
+});
 
 module.exports = mongoose.model('Job', JobSchema);

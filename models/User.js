@@ -40,7 +40,6 @@ const userSchema = new mongoose.Schema({
     rejectionReason: { type: String, default: '' },
   },
 
-  // ── Worker-specific profile ───────────────────────────────────────────────
   worker: {
     skill:         { type: String, default: '' },
     skills:        [String],
@@ -50,17 +49,23 @@ const userSchema = new mongoose.Schema({
     rating: { average: { type: Number, default: 0 }, count: { type: Number, default: 0 } },
     totalJobsDone: { type: Number, default: 0 },
 
-    // GeoJSON Point — worker's current/last-known position, captured via
-    // browser geolocation (see PATCH /api/workers/location). Used for
-    // radius-based job matching. [lng, lat] per MongoDB's convention.
+    // FIX: removed `default: 'Point'` from the nested `type` field below.
+    // That default caused Mongoose to auto-materialize
+    // `location: { type: 'Point' }` on EVERY user document — even ones that
+    // never got real coordinates — leaving `coordinates` missing. That's an
+    // invalid GeoJSON point, which broke the 2dsphere index on ANY save()
+    // call (including login's loginAttempts tracking), throwing
+    // "Point must be an array or object, instead got type missing".
+    // Now `location` only exists when BOTH fields are explicitly set
+    // together (see workerController.updateMyLocation, which already does
+    // this correctly — it was only the schema default that was wrong).
     location: {
-      type: { type: String, enum: ['Point'], default: 'Point' },
-      coordinates: { type: [Number], default: undefined },
+      type: { type: String, enum: ['Point'] },
+      coordinates: { type: [Number] },
     },
-    locationUpdatedAt: { type: Date }, // lets the app judge staleness later if needed
+    locationUpdatedAt: { type: Date },
   },
 
-  // ── User (job poster) profile ─────────────────────────────────────────────
   poster: {
     rating: { average: { type: Number, default: 0 }, count: { type: Number, default: 0 } },
     totalJobsPosted: { type: Number, default: 0 },
@@ -71,8 +76,20 @@ const userSchema = new mongoose.Schema({
 
 }, { timestamps: true });
 
-// Enables $geoNear / $nearSphere radius queries to find nearby workers.
 userSchema.index({ 'worker.location': '2dsphere' });
+
+// Extra safety net: if a location object somehow ends up with a type but no
+// valid coordinates (e.g. from old corrupted data, or a future bug), strip
+// it entirely before saving rather than letting the 2dsphere index reject
+// the whole save. A user simply having no known location is fine; a broken
+// half-formed one is not.
+userSchema.pre('save', function (next) {
+  const loc = this.worker?.location;
+  if (loc && (!Array.isArray(loc.coordinates) || loc.coordinates.length !== 2)) {
+    this.worker.location = undefined;
+  }
+  next();
+});
 
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
