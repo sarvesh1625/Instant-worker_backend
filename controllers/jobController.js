@@ -6,6 +6,29 @@ const { createNotification } = require('./notificationController');
 // Auto-expand radii, in km, tried in order until at least one match is found.
 const RADII_KM = [6, 15, 30];
 
+// FIX: fallback center coordinates for each city in the app's fixed CITIES
+// dropdown (PostJob.jsx / BrowseJobs.jsx). A job only gets a real GPS point
+// when the poster used the location picker — if they skipped it (GPS
+// denied, or just didn't interact with the map pin), the job previously
+// saved with NO location.point at all, which made it invisible to any
+// worker doing a radius search (nearly everyone, since BrowseJobs.jsx tries
+// GPS on load and switches into geo-search mode automatically). Now every
+// job always gets AT LEAST an approximate city-center point, so it's never
+// silently excluded — precise GPS from the picker is still used when given,
+// this is purely a safety net for when it isn't.
+const CITY_COORDS = {
+  Hyderabad:      { lat: 17.3850, lng: 78.4867 },
+  Visakhapatnam:  { lat: 17.6868, lng: 83.2185 },
+  Vijayawada:     { lat: 16.5062, lng: 80.6480 },
+  Warangal:       { lat: 17.9689, lng: 79.5941 },
+  Tirupati:       { lat: 13.6288, lng: 79.4192 },
+  Bengaluru:      { lat: 12.9716, lng: 77.5946 },
+  Chennai:        { lat: 13.0827, lng: 80.2707 },
+  Mumbai:         { lat: 19.0760, lng: 72.8777 },
+  Delhi:          { lat: 28.7041, lng: 77.1025 },
+  Pune:           { lat: 18.5204, lng: 73.8567 },
+};
+
 // ── Find available workers matching skill within radius (falls back to
 // exact-city match if the job has no GPS point) ─────────────────────────────
 const findAndNotifyUrgentWorkers = async (job) => {
@@ -29,8 +52,6 @@ const findAndNotifyUrgentWorkers = async (job) => {
         if (workers.length > 0) break;
       }
     } else {
-      // No GPS on this job (older job, or GPS was denied at post time) —
-      // fall back to the original exact-city text match.
       workers = await User.find({
         role: 'worker', 'worker.skill': job.skill, city: job.location.city, 'worker.availability': true,
       }).select('_id name');
@@ -62,20 +83,37 @@ const createJob = async (req, res) => {
     const location = { city, area };
     const latNum = parseFloat(lat);
     const lngNum = parseFloat(lng);
-    // Derive the GeoJSON point automatically whenever coordinates are given
-    // (from GPS auto-fill or the manual map pin) — everything downstream
-    // (radius search, urgent-worker matching) depends on this point existing.
+
     if (!isNaN(latNum) && !isNaN(lngNum)) {
+      // Precise location from the picker (GPS or dragged pin) — best case.
       location.lat = latNum;
       location.lng = lngNum;
       location.point = { type: 'Point', coordinates: [lngNum, latNum] };
+    } else if (CITY_COORDS[city]) {
+      // FIX: fallback so the job is never invisible to geo search just
+      // because the poster skipped the location picker.
+      const c = CITY_COORDS[city];
+      location.lat = c.lat;
+      location.lng = c.lng;
+      location.point = { type: 'Point', coordinates: [c.lng, c.lat] };
     }
+    // If the city isn't in CITY_COORDS either (shouldn't happen — the
+    // dropdown is a fixed list), the job simply has no point and only
+    // shows up via the classic city-text fallback search path.
 
     const job = await Job.create({
       postedBy: req.user._id, title, skill, description, location,
       wage, workersNeeded, duration, startDate, startTime, jobType: jobType || 'regular',
       urgentWithinHours: urgentWithinHours || 2,
     });
+
+    // FIX: poster.totalJobsPosted was never incremented anywhere — the
+    // Dashboard stat card always showed the same number regardless of how
+    // many jobs were actually posted.
+    try {
+      await User.findByIdAndUpdate(req.user._id, { $inc: { 'poster.totalJobsPosted': 1 } });
+    } catch (e) {}
+
     if (job.jobType === 'urgent') await findAndNotifyUrgentWorkers(job);
     res.status(201).json({ success: true, job });
   } catch (error) {
@@ -85,11 +123,6 @@ const createJob = async (req, res) => {
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// ── Radius-based job search with quiet auto-expand ──────────────────────────
-// When the worker's lat/lng are provided, searches 6km → 15km → 30km,
-// stopping at the first radius that returns results (or settling on 30km if
-// still empty). Falls back to the original city/skill text search when no
-// coordinates are given — covers GPS-denied workers and older clients.
 const getJobs = async (req, res) => {
   try {
     const { skill, city, jobType, page = 1, limit = 20, lat, lng } = req.query;
@@ -108,7 +141,6 @@ const getJobs = async (req, res) => {
       let usedRadiusKm = RADII_KM[RADII_KM.length - 1];
 
       for (const radiusKm of RADII_KM) {
-        // $geoNear must be the first stage in the pipeline.
         matches = await Job.aggregate([
           {
             $geoNear: {
@@ -129,8 +161,6 @@ const getJobs = async (req, res) => {
       const pageSlice = matches.slice(skip, skip + Number(limit));
       const idOrder = pageSlice.map(m => m._id);
 
-      // Aggregation results are plain objects, not Mongoose documents, so
-      // populate has to run as a separate step against real documents.
       let jobs = await Job.find({ _id: { $in: idOrder } })
         .populate('postedBy', 'name phone')
         .populate('applicants.worker', 'name phone');
@@ -151,7 +181,6 @@ const getJobs = async (req, res) => {
       });
     }
 
-    // ── Fallback: classic city/skill text search (no GPS available) ────────
     const query = { ...baseMatch };
     if (city && city.trim()) {
       const cleanCity = escapeRegex(city.trim());
