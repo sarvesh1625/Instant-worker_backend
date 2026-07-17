@@ -16,10 +16,13 @@ app.set('trust proxy', 1);
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
+// ── Security: restricted CORS ─────────────────────────────────────────────────
+// CLIENT_URL can hold a comma-separated list of allowed origins, e.g.:
+//   CLIENT_URL=https://www.instantworker.in,https://instant-worker-frontend.vercel.app
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
-  process.env.CLIENT_URL,
+  ...(process.env.CLIENT_URL ? process.env.CLIENT_URL.split(',').map(u => u.trim()) : []),
 ].filter(Boolean);
 
 app.use(cors({
@@ -57,9 +60,11 @@ app.use('/api/tts',           require('./routes/ttsRoutes'));
 app.use('/api/location',      require('./routes/locationRoutes'));
 app.use('/api/wallet',        require('./routes/walletRoutes'));
 app.use('/api/account',       require('./routes/accountRoutes'));
-// ⚠️ MISSING — userRoutes.js exists but is never mounted. Add this line if
-// /api/users/me and /api/users/upload-photo are meant to be reachable:
-// app.use('/api/users', require('./routes/userRoutes'));
+// FIX: this line was missing/lost — userRoutes.js existed on disk but was
+// never actually mounted, so /api/users/me and /api/users/upload-photo
+// (profile photo upload) 404'd on every call, even though the route file
+// and controller were both correct.
+app.use('/api/users',         require('./routes/userRoutes'));
 
 app.get('/', (req, res) => res.json({ message: 'Instant Worker API' }));
 
