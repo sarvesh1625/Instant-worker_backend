@@ -3,19 +3,8 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const { createNotification } = require('./notificationController');
 
-// Auto-expand radii, in km, tried in order until at least one match is found.
 const RADII_KM = [6, 15, 30];
 
-// FIX: fallback center coordinates for each city in the app's fixed CITIES
-// dropdown (PostJob.jsx / BrowseJobs.jsx). A job only gets a real GPS point
-// when the poster used the location picker — if they skipped it (GPS
-// denied, or just didn't interact with the map pin), the job previously
-// saved with NO location.point at all, which made it invisible to any
-// worker doing a radius search (nearly everyone, since BrowseJobs.jsx tries
-// GPS on load and switches into geo-search mode automatically). Now every
-// job always gets AT LEAST an approximate city-center point, so it's never
-// silently excluded — precise GPS from the picker is still used when given,
-// this is purely a safety net for when it isn't.
 const CITY_COORDS = {
   Hyderabad:      { lat: 17.3850, lng: 78.4867 },
   Visakhapatnam:  { lat: 17.6868, lng: 83.2185 },
@@ -29,8 +18,6 @@ const CITY_COORDS = {
   Pune:           { lat: 18.5204, lng: 73.8567 },
 };
 
-// ── Find available workers matching skill within radius (falls back to
-// exact-city match if the job has no GPS point) ─────────────────────────────
 const findAndNotifyUrgentWorkers = async (job) => {
   try {
     let workers = [];
@@ -59,6 +46,10 @@ const findAndNotifyUrgentWorkers = async (job) => {
 
     if (workers.length === 0) return;
 
+    // FIX: title/body kept as an English fallback (e.g. for admin views or
+    // any future non-translated surface), but `meta` now carries the raw
+    // data so Notifications.jsx can render this in the recipient's
+    // language instead of always English.
     await Promise.all(workers.map(w =>
       createNotification({
         recipient: w._id,
@@ -66,6 +57,7 @@ const findAndNotifyUrgentWorkers = async (job) => {
         title: '🔴 Urgent work nearby!',
         body: `${job.title} — ${job.skill} needed NOW in ${job.location.city}. ₹${job.wage}/day. Tap to respond fast!`,
         link: `/jobs/urgent/${job._id}`,
+        meta: { jobTitle: job.title, skill: job.skill, city: job.location.city, wage: job.wage },
       })
     ));
 
@@ -85,21 +77,15 @@ const createJob = async (req, res) => {
     const lngNum = parseFloat(lng);
 
     if (!isNaN(latNum) && !isNaN(lngNum)) {
-      // Precise location from the picker (GPS or dragged pin) — best case.
       location.lat = latNum;
       location.lng = lngNum;
       location.point = { type: 'Point', coordinates: [lngNum, latNum] };
     } else if (CITY_COORDS[city]) {
-      // FIX: fallback so the job is never invisible to geo search just
-      // because the poster skipped the location picker.
       const c = CITY_COORDS[city];
       location.lat = c.lat;
       location.lng = c.lng;
       location.point = { type: 'Point', coordinates: [c.lng, c.lat] };
     }
-    // If the city isn't in CITY_COORDS either (shouldn't happen — the
-    // dropdown is a fixed list), the job simply has no point and only
-    // shows up via the classic city-text fallback search path.
 
     const job = await Job.create({
       postedBy: req.user._id, title, skill, description, location,
@@ -107,9 +93,6 @@ const createJob = async (req, res) => {
       urgentWithinHours: urgentWithinHours || 2,
     });
 
-    // FIX: poster.totalJobsPosted was never incremented anywhere — the
-    // Dashboard stat card always showed the same number regardless of how
-    // many jobs were actually posted.
     try {
       await User.findByIdAndUpdate(req.user._id, { $inc: { 'poster.totalJobsPosted': 1 } });
     } catch (e) {}
@@ -329,6 +312,7 @@ const applyToJob = async (req, res) => {
         recipient: job.postedBy._id, type: 'urgent_filled', title: 'Urgent job — worker confirmed! ⚡',
         body: `${req.user.name} accepted your urgent job "${job.title}" and is on the way. Chat is open now.`,
         link: `/chat/${req.user._id}`,
+        meta: { actorName: req.user.name, jobTitle: job.title },
       });
 
       return res.status(200).json({ success: true, message: "You're confirmed! Chat is now open.", autoAccepted: true });
@@ -340,6 +324,7 @@ const applyToJob = async (req, res) => {
     await createNotification({
       recipient: job.postedBy._id, type: 'job_applied', title: 'New applicant!',
       body: `${req.user.name} applied to your job: ${job.title}`, link: '/jobs/my',
+      meta: { actorName: req.user.name, jobTitle: job.title },
     });
 
     res.status(200).json({ success: true, message: 'Applied successfully!', autoAccepted: false });
@@ -391,6 +376,7 @@ const updateApplicantStatus = async (req, res) => {
         ? `Your application for "${job.title}" was accepted. You can now chat with the poster.`
         : `Your application for "${job.title}" was not selected this time.`,
       link:  status === 'accepted' ? `/chat/${job.postedBy}` : '/jobs',
+      meta: { jobTitle: job.title },
     });
 
     res.status(200).json({
@@ -433,6 +419,7 @@ const startWork = async (req, res) => {
       title: 'Work has started! 🔨',
       body:  `${req.user.name} marked "${job.title}" as started. Time to begin work!`,
       link:  '/my-work',
+      meta: { actorName: req.user.name, jobTitle: job.title },
     });
 
     res.status(200).json({ success: true, message: 'Work marked as started', workStatus: 'in_progress' });
@@ -479,6 +466,7 @@ const completeWork = async (req, res) => {
       title: 'Work completed! ✅',
       body:  `${req.user.name} marked "${job.title}" as completed. ₹${job.wage} added to your wallet records. Don't forget to rate them!`,
       link:  '/wallet',
+      meta: { actorName: req.user.name, jobTitle: job.title, amount: job.wage },
     });
 
     res.status(200).json({ success: true, message: 'Work marked as completed', workStatus: 'completed' });
