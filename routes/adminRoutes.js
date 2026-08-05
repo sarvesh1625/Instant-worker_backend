@@ -9,6 +9,9 @@ const {
   getAllReports, resolveReport,
   getAllJobs, deleteJob,
 } = require('../controllers/adminController');
+const {
+  getAllSkillsAdmin, createSkill, updateSkill, deleteSkill,
+} = require('../controllers/skillController');
 const { protect } = require('../middleware/auth');
 const { adminOnly } = require('../middleware/adminAuth');
 
@@ -38,5 +41,11 @@ router.patch('/reports/:id/resolve', resolveReport);
 
 router.get('/jobs',        getAllJobs);
 router.delete('/jobs/:id', deleteJob);
+
+// NEW — skill management
+router.get('/skills',           getAllSkillsAdmin);
+router.post('/skills',          createSkill);
+router.patch('/skills/:id',     updateSkill);
+router.delete('/skills/:id',    deleteSkill);
 
 module.exports = router;
