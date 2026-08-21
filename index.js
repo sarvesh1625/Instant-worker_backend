@@ -17,9 +17,12 @@ app.set('trust proxy', 1);
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
+// server/index.js — add 'http://localhost:8081' (Expo web preview) to the
+// allowedOrigins array. Everything else in this block stays the same.
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
+  'http://localhost:8081',   // NEW — Expo web preview (npx expo start, press 'w')
   ...(process.env.CLIENT_URL ? process.env.CLIENT_URL.split(',').map(u => u.trim()) : []),
 ].filter(Boolean);
 
