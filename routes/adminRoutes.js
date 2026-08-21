@@ -14,6 +14,16 @@ const {
 } = require('../controllers/skillController');
 const { protect } = require('../middleware/auth');
 const { adminOnly } = require('../middleware/adminAuth');
+const { getSettings, toggleSubscriptions } = require('../controllers/platformSettingsController');
+// const {
+//   getAllPlansAdmin, createPlan, updatePlan, deactivatePlan, getAllSubscriptions, grantSubscription,
+// } = require('../controllers/adminSubscriptionController');
+
+const {
+  getAllPlansAdmin, createPlan, updatePlan, deactivatePlan, getAllSubscriptions, grantSubscription,
+  adminCancelSubscription, getLeaderboard,
+} = require('../controllers/adminSubscriptionController');
+
 
 router.post('/login', adminLogin);
 router.use(protect, adminOnly);
@@ -47,5 +57,16 @@ router.get('/skills',           getAllSkillsAdmin);
 router.post('/skills',          createSkill);
 router.patch('/skills/:id',     updateSkill);
 router.delete('/skills/:id',    deleteSkill);
+router.get('/settings',              getSettings);
+router.patch('/settings/subscriptions', toggleSubscriptions);
+
+router.get('/subscriptions/plans',      getAllPlansAdmin);
+router.post('/subscriptions/plans',     createPlan);
+router.patch('/subscriptions/plans/:id',updatePlan);
+router.delete('/subscriptions/plans/:id',deactivatePlan);
+router.get('/subscriptions',            getAllSubscriptions);
+router.post('/subscriptions/grant',     grantSubscription);
+router.post('/subscriptions/:id/cancel', adminCancelSubscription);
+router.get('/leaderboard', getLeaderboard);
 
 module.exports = router;

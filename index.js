@@ -14,6 +14,7 @@ connectDB();
 const app = express();
 app.set('trust proxy', 1);
 
+
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
 const allowedOrigins = [
@@ -30,7 +31,11 @@ app.use(cors({
   credentials: true,
 }));
 
-app.use(express.json({ limit: '10mb' }));
+// app.use(express.json({ limit: '10mb' }));
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, res, buf) => { req.rawBody = buf; }
+}));
 app.use(mongoSanitize());
 app.use('/api', generalLimiter);
 
@@ -60,6 +65,7 @@ app.use('/api/account',       require('./routes/accountRoutes'));
 app.use('/api/users',         require('./routes/userRoutes'));
 // NEW — public skill list, used by every skill dropdown across the app
 app.use('/api/skills',        require('./routes/skillRoutes'));
+app.use('/api/subscriptions', require('./routes/subscriptionRoutes'));
 
 app.get('/', (req, res) => res.json({ message: 'Instant Worker API' }));
 

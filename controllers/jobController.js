@@ -1,6 +1,8 @@
 const Job  = require('../models/Job');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
+const PlatformSettings   = require('../models/PlatformSettings');
+const UserSubscription   = require('../models/UserSubscription');
 const { createNotification } = require('./notificationController');
 
 const RADII_KM = [6, 15, 30];
@@ -16,6 +18,33 @@ const CITY_COORDS = {
   Mumbai:         { lat: 19.0760, lng: 72.8777 },
   Delhi:          { lat: 28.7041, lng: 77.1025 },
   Pune:           { lat: 18.5204, lng: 73.8567 },
+};
+
+// ── Subscription-gated early access ─────────────────────────────────────────
+// FIX/NEW: while subscriptionsEnabled is false (the default — matches the
+// platform's behavior up to this point), these two helpers are no-ops and
+// every worker sees every job identically, same as always. Once an admin
+// flips the toggle in AdminSettings, subscribed workers keep seeing jobs
+// instantly; everyone else is delayed by `earlyAccessMinutes` on BOTH
+// regular and urgent jobs, per the agreed design — this is intentionally
+// NOT special-cased differently for urgent jobs, since urgent jobs auto-
+// confirm the first person to accept, so the delay naturally has more real
+// impact there without needing separate logic.
+const hasActiveSubscription = async (userId) => {
+  const sub = await UserSubscription.findOne({ user: userId, status: 'active' });
+  return !!sub;
+};
+
+// Returns { enabled, delayMinutes, isSubscribed } for the given worker.
+// Callers use this once per request rather than re-checking settings and
+// subscription status separately in multiple places.
+const getEarlyAccessContext = async (userId) => {
+  const settings = await PlatformSettings.getSettings();
+  if (!settings.subscriptionsEnabled) {
+    return { enabled: false, delayMinutes: 0, isSubscribed: false };
+  }
+  const isSubscribed = await hasActiveSubscription(userId);
+  return { enabled: true, delayMinutes: settings.earlyAccessMinutes, isSubscribed };
 };
 
 const findAndNotifyUrgentWorkers = async (job) => {
@@ -46,11 +75,38 @@ const findAndNotifyUrgentWorkers = async (job) => {
 
     if (workers.length === 0) return;
 
-    // FIX: title/body kept as an English fallback (e.g. for admin views or
-    // any future non-translated surface), but `meta` now carries the raw
-    // data so Notifications.jsx can render this in the recipient's
-    // language instead of always English.
-    await Promise.all(workers.map(w =>
+    // NEW: when the subscription system is on, an urgent-job push
+    // notification only goes out INSTANTLY to subscribed workers.
+    // Non-subscribed workers are not notified immediately — they simply
+    // discover the job through the normal Find Work listing once it clears
+    // the earlyAccessMinutes delay (handled in getUrgentJobs/getJobs below).
+    // This avoids needing a delayed-job scheduler entirely: rather than
+    // "send a notification 15 minutes late" (fragile across server
+    // restarts), we just don't send it early, and let the listing's own
+    // time filter be the single source of truth for when a job becomes
+    // visible to non-subscribers.
+    const settings = await PlatformSettings.getSettings();
+    let notifyList = workers;
+
+    if (settings.subscriptionsEnabled) {
+      const activeSubs = await UserSubscription.find({
+        user: { $in: workers.map(w => w._id) },
+        status: 'active',
+      }).select('user');
+      const subscribedIds = new Set(activeSubs.map(s => s.user.toString()));
+      notifyList = workers.filter(w => subscribedIds.has(w._id.toString()));
+    }
+
+    if (notifyList.length === 0) {
+      // Nobody subscribed among the matching workers — still record who
+      // WOULD have matched, so getUrgentJobs can find them later once the
+      // delay clears; just skip the instant push.
+      job.urgentNotifiedWorkers = workers.map(w => w._id);
+      await job.save();
+      return;
+    }
+
+    await Promise.all(notifyList.map(w =>
       createNotification({
         recipient: w._id,
         type: 'urgent_job',
@@ -61,7 +117,7 @@ const findAndNotifyUrgentWorkers = async (job) => {
       })
     ));
 
-    job.urgentNotifiedWorkers = workers.map(w => w._id);
+    job.urgentNotifiedWorkers = workers.map(w => w._id); // record everyone who matched, subscribed or not
     await job.save();
   } catch (err) {
     console.error('Urgent notify error:', err.message);
@@ -114,6 +170,24 @@ const getJobs = async (req, res) => {
     const baseMatch = { status: 'open' };
     if (skill && skill.trim()) baseMatch.skill = { $regex: `^${escapeRegex(skill.trim())}$`, $options: 'i' };
     if (jobType) baseMatch.jobType = jobType;
+
+    // NEW: apply the early-access cutoff. When the subscription system is
+    // off, or this worker IS subscribed, `cutoff` stays null and no time
+    // filter is added — behavior is identical to before this feature
+    // existed. When on and this worker is NOT subscribed, jobs newer than
+    // `delayMinutes` are excluded from their results entirely — they
+    // simply don't exist yet from that worker's point of view, and will
+    // appear automatically once enough time has passed (no separate
+    // "reveal" step needed — it's just a live timestamp comparison on
+    // every request).
+    let earlyAccess = { enabled: false, delayMinutes: 0, isSubscribed: false };
+    if (req.user) {
+      earlyAccess = await getEarlyAccessContext(req.user._id);
+    }
+    if (earlyAccess.enabled && !earlyAccess.isSubscribed) {
+      const cutoff = new Date(Date.now() - earlyAccess.delayMinutes * 60 * 1000);
+      baseMatch.createdAt = { $lte: cutoff };
+    }
 
     const userLat = parseFloat(lat);
     const userLng = parseFloat(lng);
@@ -197,6 +271,19 @@ const getUrgentJobs = async (req, res) => {
     const query = { status: 'open', jobType: 'urgent' };
     if (skill && skill.trim()) query.skill = { $regex: `^${escapeRegex(skill.trim())}$`, $options: 'i' };
     if (city  && city.trim())  query['location.city'] = { $regex: escapeRegex(city.trim()), $options: 'i' };
+
+    // NEW: same early-access cutoff as getJobs, applied here too — this is
+    // the endpoint the "Urgent jobs" banner polls, so it needs the same
+    // gating or a non-subscribed worker would see the urgent banner appear
+    // instantly anyway, defeating the whole point.
+    if (req.user) {
+      const earlyAccess = await getEarlyAccessContext(req.user._id);
+      if (earlyAccess.enabled && !earlyAccess.isSubscribed) {
+        const cutoff = new Date(Date.now() - earlyAccess.delayMinutes * 60 * 1000);
+        query.createdAt = { $lte: cutoff };
+      }
+    }
+
     const jobs = await Job.find(query)
       .populate('postedBy', 'name phone').populate('applicants.worker', 'name phone').sort({ createdAt: -1 });
     res.status(200).json({ success: true, jobs });

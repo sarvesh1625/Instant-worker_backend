@@ -53,12 +53,17 @@ const getDashboardStats = async (req, res) => {
   }
 };
 
+// FIX/NEW: added `city` query param support, matching the new dropdown
+// filter in AdminUsers.jsx. Case-insensitive exact match (^...$ anchors) so
+// it only matches the real city, not a substring match that could
+// accidentally include unrelated cities sharing a shorter name.
 const getAllUsers = async (req, res) => {
   try {
-    const { role, status, search, page = 1, limit = 20 } = req.query;
+    const { role, status, city, search, page = 1, limit = 20 } = req.query;
     const query = { role: { $ne: 'admin' } };
     if (role)   query.role = role;
     if (status) query.accountStatus = status;
+    if (city)   query.city = { $regex: `^${city}$`, $options: 'i' };
     if (search) query.$or = [{ name: { $regex: search, $options: 'i' } }, { phone: { $regex: search, $options: 'i' } }];
     const skip = (Number(page) - 1) * Number(limit);
     const total = await User.countDocuments(query);
