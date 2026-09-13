@@ -315,7 +315,70 @@ const verifyOTP = async (req, res) => {
   }
 };
 
+// ── Forgot password (NEW) ─────────────────────────────────────────────────
+// Same user.otp pattern as sendOTP/verifyOTP above, and the same
+// isTestMode() dev-console-log pattern as sendRegisterOtp above.
+const forgotPasswordSendOtp = async (req, res) => {
+  try {
+    const { phone } = req.body;
+    const user = await User.findOne({ phone });
+
+    // Deliberately vague either way — don't reveal whether a phone number
+    // is actually registered (basic enumeration-attack hygiene)
+    if (!user) {
+      return res.status(200).json({
+        success: true,
+        message: 'If that number is registered, an OTP has been sent.',
+      });
+    }
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    user.otp = { code, expiresAt };
+    await user.save();
+
+    if (isTestMode()) {
+      console.log(`[TEST MODE] Password reset OTP for ${phone}: ${code}`);
+      return res.status(200).json({ success: true, message: 'OTP sent (test mode)', otp_dev: code });
+    }
+
+    res.status(200).json({ success: true, message: 'OTP sent.' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const resetPassword = async (req, res) => {
+  try {
+    const { phone, otp, newPassword } = req.body;
+
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+    }
+
+    const user = await User.findOne({ phone });
+    if (!user || !user.otp || !user.otp.code) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired OTP. Request a new one.' });
+    }
+    if (user.otp.code !== otp) {
+      return res.status(400).json({ success: false, message: 'Invalid OTP' });
+    }
+    if (user.otp.expiresAt < Date.now()) {
+      return res.status(400).json({ success: false, message: 'OTP has expired. Request a new one.' });
+    }
+
+    user.password = newPassword; // pre-save hook hashes this automatically
+    user.otp = undefined;
+    await user.save();
+
+    res.status(200).json({ success: true, message: 'Password reset successfully. Please log in.' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   register, login, getMe, sendOTP, verifyOTP, sendRegisterOtp,
   verifyWidgetTokenAndRegister,
+  forgotPasswordSendOtp, resetPassword,
 };
