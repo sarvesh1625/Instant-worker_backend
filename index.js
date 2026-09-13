@@ -70,6 +70,7 @@ app.use('/api/users',         require('./routes/userRoutes'));
 app.use('/api/skills',        require('./routes/skillRoutes'));
 app.use('/api/subscriptions', require('./routes/subscriptionRoutes'));
 app.use('/api/auth/forgot-password-send-otp', otpLimiter);
+app.use('/api', require('./routes/sitemapRoute'));
 
 
 app.get('/', (req, res) => res.json({ message: 'Instant Worker API' }));
