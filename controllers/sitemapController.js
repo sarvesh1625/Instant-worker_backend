@@ -11,11 +11,28 @@ const slugify = (str) => String(str).toLowerCase().trim().replace(/\s+/g, '-').r
 
 const getSitemap = async (req, res) => {
   try {
-    const skillDocs = await Skill.find({ active: true }).sort('order').lean();
-    const skills = skillDocs.map(s => s.name);
+    // CHANGED: was a blind cross-join of every active skill × every city
+    // with ANY worker — that generated 22 URLs for only ~13 workers total,
+    // most landing on an empty "no workers yet" page. Google can treat a
+    // site with many near-identical, mostly-empty templated pages as thin
+    // content, which can hurt rankings SITE-WIDE, not just on those pages.
+    //
+    // Now: only generate a skill×city URL for combinations that actually
+    // have at least one real worker. This aggregation groups real worker
+    // records directly, so the sitemap only ever lists pages with genuine
+    // content — it grows automatically as real workers join, instead of
+    // pre-publishing empty placeholders for combinations that don't exist
+    // yet.
+    const realCombos = await User.aggregate([
+      { $match: { role: 'worker', city: { $nin: [null, ''] }, 'worker.skill': { $nin: [null, ''] } } },
+      { $group: { _id: { skill: '$worker.skill', city: '$city' } } },
+    ]);
 
-    const cities = (await User.distinct('city', { role: 'worker', city: { $ne: null, $ne: '' } }))
-      .filter(Boolean);
+    const skillCityUrls = realCombos.map(c => ({
+      loc: `/workers/${slugify(c._id.skill)}/${slugify(c._id.city)}`,
+      priority: '0.8',
+      changefreq: 'weekly',
+    }));
 
     const workers = await User.find({ role: 'worker', isVerified: true })
       .select('_id updatedAt').lean();
@@ -25,17 +42,6 @@ const getSitemap = async (req, res) => {
       { loc: '/login', priority: '0.3', changefreq: 'monthly' },
       { loc: '/register', priority: '0.5', changefreq: 'monthly' },
     ];
-
-    const skillCityUrls = [];
-    for (const skill of skills) {
-      for (const city of cities) {
-        skillCityUrls.push({
-          loc: `/workers/${slugify(skill)}/${slugify(city)}`,
-          priority: '0.8',
-          changefreq: 'weekly',
-        });
-      }
-    }
 
     const workerUrls = workers.map(w => ({
       loc: `/worker/${w._id}`,
