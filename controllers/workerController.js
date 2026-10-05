@@ -2,9 +2,17 @@ const User = require('../models/User');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+// CHANGED: added optional lat/lng params. When sent, results are filtered
+// to within 100km using the worker.location geo field your updateMyLocation
+// endpoint already populates, sorted by distance (closest first). Falls
+// back to the ORIGINAL city/area text search + availability/rating sort
+// when coordinates aren't sent — nothing breaks for callers that don't
+// send them yet.
+const SEARCH_RADIUS_METERS = 100 * 1000; // 100km
+
 const searchWorkers = async (req, res) => {
   try {
-    const { skill, city, availability, page = 1, limit = 20 } = req.query;
+    const { skill, city, availability, lat, lng, page = 1, limit = 20 } = req.query;
 
     const query = {
       role: 'worker',
@@ -15,7 +23,18 @@ const searchWorkers = async (req, res) => {
       query['worker.skill'] = { $regex: `^${escapeRegex(skill.trim())}$`, $options: 'i' };
     }
 
-    if (city && city.trim()) {
+    const latNum = parseFloat(lat);
+    const lngNum = parseFloat(lng);
+    const hasGeo = !isNaN(latNum) && !isNaN(lngNum);
+
+    if (hasGeo) {
+      query['worker.location'] = {
+        $nearSphere: {
+          $geometry: { type: 'Point', coordinates: [lngNum, latNum] },
+          $maxDistance: SEARCH_RADIUS_METERS,
+        },
+      };
+    } else if (city && city.trim()) {
       const c = escapeRegex(city.trim());
       query.$or = [
         { city: { $regex: c, $options: 'i' } },
@@ -29,17 +48,27 @@ const searchWorkers = async (req, res) => {
     const skip  = (Number(page) - 1) * Number(limit);
     const total = await User.countDocuments(query);
 
-    const workers = await User.find(query)
+    // $nearSphere already sorts by distance and can't be combined with an
+    // additional .sort() — MongoDB errors if you try. The availability/
+    // rating sort only applies to the non-geo (city-text) fallback path.
+    let workersQuery = User.find(query)
       .select('name phone profilePhoto city area bio languages worker isVerified idVerification.status createdAt')
-      .sort({ 'worker.availability': -1, 'worker.rating.average': -1, createdAt: -1 })
       .skip(skip)
       .limit(Number(limit));
+
+    if (!hasGeo) {
+      workersQuery = workersQuery.sort({ 'worker.availability': -1, 'worker.rating.average': -1, createdAt: -1 });
+    }
+
+    const workers = await workersQuery;
 
     res.status(200).json({
       success: true,
       total,
       page: Number(page),
       pages: Math.ceil(total / Number(limit)),
+      geoSearch: hasGeo,
+      radiusKm: hasGeo ? SEARCH_RADIUS_METERS / 1000 : undefined,
       workers,
     });
   } catch (err) {

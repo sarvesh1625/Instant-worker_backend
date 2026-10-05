@@ -32,6 +32,15 @@ const JobSchema = new mongoose.Schema({
   urgentWithinHours:     { type: Number, default: 2 },
   urgentNotifiedWorkers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 
+  // Progress of the nearby-worker notification flow (see services/jobNotifier.js).
+  // Each number = how many of the 3 stages (6 km / 15 km / 25 km) have been
+  // sent to that group. 'premium' = subscribed workers (or everyone while
+  // subscriptions are off); 'standard' = everyone else, delayed.
+  notifyProgress: {
+    premium:  { type: Number, default: 0 },
+    standard: { type: Number, default: 0 },
+  },
+
   startDate: String,
   startTime: String,
   duration:  String,
