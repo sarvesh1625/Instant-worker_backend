@@ -2,71 +2,126 @@ const User = require('../models/User');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// CHANGED: added optional lat/lng params. When sent, results are filtered
-// to within 100km using the worker.location geo field your updateMyLocation
-// endpoint already populates, sorted by distance (closest first). Falls
-// back to the ORIGINAL city/area text search + availability/rating sort
-// when coordinates aren't sent — nothing breaks for callers that don't
-// send them yet.
-const SEARCH_RADIUS_METERS = 100 * 1000; // 100km
+// ─────────────────────────────────────────────────────────────────────────────
+// Worker search
+//
+//  • With the user's coordinates (lat/lng): only workers within 150 km are
+//    returned — anyone farther away, or who has no stored location, is hidden.
+//  • Best-rated workers first. A plain average would let ONE 5-star review beat
+//    a worker with 60 reviews averaging 4.8, so the score pulls small samples
+//    toward 4.0 (as if every worker had 3 extra "neutral" reviews). Ties
+//    (e.g. several unrated workers) are broken by distance, nearest first.
+//  • Category: when `skill` is sent, only that category is returned.
+//  • Without coordinates (user said no to location): falls back to the city /
+//    area text match, same ranking, no distance cut-off.
+//
+// Results only contain public profile fields. They NEVER include the worker's
+// phone number or exact GPS point — only a rounded `distanceKm`.
+// ─────────────────────────────────────────────────────────────────────────────
+const SEARCH_RADIUS_METERS = 150 * 1000;   // 150 km
+const RATING_PRIOR_MEAN = 4.0;
+const RATING_PRIOR_WEIGHT = 3;
+
+// Inclusion list on purpose: aggregation ignores the schema's `select: false`,
+// so anything not listed here (password hash, otp, phone, GPS) is never sent.
+const WORKER_PUBLIC_FIELDS = {
+  name: 1, profilePhoto: 1, city: 1, area: 1, bio: 1, languages: 1, isVerified: 1,
+  'idVerification.status': 1, createdAt: 1,
+  'worker.skill': 1, 'worker.skills': 1, 'worker.experience': 1, 'worker.wagePerDay': 1,
+  'worker.availability': 1, 'worker.rating': 1, 'worker.totalJobsDone': 1,
+  distanceKm: 1,
+};
+
+const buildSearchPipeline = ({ match, geo, skip, limit }) => {
+  const stages = [];
+
+  if (geo) {
+    stages.push({
+      $geoNear: {
+        near: { type: 'Point', coordinates: [geo.lng, geo.lat] },
+        key: 'worker.location',
+        distanceField: 'distanceMeters',
+        maxDistance: SEARCH_RADIUS_METERS,
+        spherical: true,
+        query: match,
+      },
+    });
+  } else {
+    stages.push({ $match: match });
+  }
+
+  const ratingCount = { $ifNull: ['$worker.rating.count', 0] };
+  const ratingAvg   = { $ifNull: ['$worker.rating.average', 0] };
+  stages.push({
+    $addFields: {
+      ratingScore: {
+        $divide: [
+          { $add: [{ $multiply: [ratingAvg, ratingCount] }, RATING_PRIOR_MEAN * RATING_PRIOR_WEIGHT] },
+          { $add: [ratingCount, RATING_PRIOR_WEIGHT] },
+        ],
+      },
+      ...(geo ? { distanceKm: { $round: [{ $divide: ['$distanceMeters', 1000] }, 1] } } : {}),
+    },
+  });
+
+  stages.push({
+    $sort: geo
+      ? { ratingScore: -1, distanceMeters: 1, createdAt: -1 }
+      : { ratingScore: -1, 'worker.availability': -1, createdAt: -1 },
+  });
+
+  stages.push({
+    $facet: {
+      rows:  [{ $skip: skip }, { $limit: limit }, { $project: WORKER_PUBLIC_FIELDS }],
+      total: [{ $count: 'n' }],
+    },
+  });
+
+  return stages;
+};
 
 const searchWorkers = async (req, res) => {
   try {
-    const { skill, city, availability, lat, lng, page = 1, limit = 20 } = req.query;
+    const { skill, city, availability, lat, lng } = req.query;
+    const page  = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
 
-    const query = {
-      role: 'worker',
-      accountStatus: 'active',
-    };
+    const match = { role: 'worker', accountStatus: 'active' };
 
     if (skill && skill.trim()) {
-      query['worker.skill'] = { $regex: `^${escapeRegex(skill.trim())}$`, $options: 'i' };
+      match['worker.skill'] = { $regex: `^${escapeRegex(skill.trim())}$`, $options: 'i' };
     }
+    if (availability === 'true')  match['worker.availability'] = true;
+    if (availability === 'false') match['worker.availability'] = false;
 
     const latNum = parseFloat(lat);
     const lngNum = parseFloat(lng);
-    const hasGeo = !isNaN(latNum) && !isNaN(lngNum);
+    const hasGeo = Number.isFinite(latNum) && Number.isFinite(lngNum);
 
-    if (hasGeo) {
-      query['worker.location'] = {
-        $nearSphere: {
-          $geometry: { type: 'Point', coordinates: [lngNum, latNum] },
-          $maxDistance: SEARCH_RADIUS_METERS,
-        },
-      };
-    } else if (city && city.trim()) {
+    if (!hasGeo && city && city.trim()) {
       const c = escapeRegex(city.trim());
-      query.$or = [
+      match.$or = [
         { city: { $regex: c, $options: 'i' } },
         { area: { $regex: c, $options: 'i' } },
       ];
     }
 
-    if (availability === 'true')  query['worker.availability'] = true;
-    if (availability === 'false') query['worker.availability'] = false;
+    const pipeline = buildSearchPipeline({
+      match,
+      geo: hasGeo ? { lat: latNum, lng: lngNum } : null,
+      skip: (page - 1) * limit,
+      limit,
+    });
 
-    const skip  = (Number(page) - 1) * Number(limit);
-    const total = await User.countDocuments(query);
-
-    // $nearSphere already sorts by distance and can't be combined with an
-    // additional .sort() — MongoDB errors if you try. The availability/
-    // rating sort only applies to the non-geo (city-text) fallback path.
-    let workersQuery = User.find(query)
-      .select('name phone profilePhoto city area bio languages worker isVerified idVerification.status createdAt')
-      .skip(skip)
-      .limit(Number(limit));
-
-    if (!hasGeo) {
-      workersQuery = workersQuery.sort({ 'worker.availability': -1, 'worker.rating.average': -1, createdAt: -1 });
-    }
-
-    const workers = await workersQuery;
+    const [out] = await User.aggregate(pipeline);
+    const workers = out?.rows || [];
+    const total = out?.total?.[0]?.n || 0;
 
     res.status(200).json({
       success: true,
       total,
-      page: Number(page),
-      pages: Math.ceil(total / Number(limit)),
+      page,
+      pages: Math.ceil(total / limit),
       geoSearch: hasGeo,
       radiusKm: hasGeo ? SEARCH_RADIUS_METERS / 1000 : undefined,
       workers,
@@ -155,14 +210,46 @@ const upsertWorkerProfile = async (req, res) => {
   }
 };
 
+// Going ONLINE needs the worker's location. The app sends lat/lng with the
+// request; they are saved here in the same step, so "online" and "has a
+// location" can never be out of sync. Going OFFLINE needs nothing.
+//
+// To switch the rule off temporarily (e.g. while the web app doesn't send a
+// location yet), set  REQUIRE_LOCATION_TO_GO_ONLINE=false  in the environment.
+const REQUIRE_LOCATION_TO_GO_ONLINE = process.env.REQUIRE_LOCATION_TO_GO_ONLINE !== 'false';
+
 const toggleAvailability = async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
     if (!user || user.role !== 'worker') {
       return res.status(403).json({ success: false, message: 'Workers only' });
     }
-    user.worker.availability = !user.worker.availability;
+
+    const goingOnline = !user.worker.availability;
+
+    if (goingOnline) {
+      const latNum = parseFloat(req.body?.lat);
+      const lngNum = parseFloat(req.body?.lng);
+      const valid =
+        Number.isFinite(latNum) && Number.isFinite(lngNum) &&
+        latNum >= -90 && latNum <= 90 && lngNum >= -180 && lngNum <= 180 &&
+        !(latNum === 0 && lngNum === 0);          // (0,0) is what a failed GPS fix often reports
+
+      if (valid) {
+        user.worker.location = { type: 'Point', coordinates: [lngNum, latNum] };
+        user.worker.locationUpdatedAt = new Date();
+      } else if (REQUIRE_LOCATION_TO_GO_ONLINE) {
+        return res.status(400).json({
+          success: false,
+          code: 'LOCATION_REQUIRED',
+          message: 'Turn on your location to go online. People near you can only find you when your location is on.',
+        });
+      }
+    }
+
+    user.worker.availability = goingOnline;
     await user.save();
+
     res.status(200).json({
       success: true,
       availability: user.worker.availability,
