@@ -5,6 +5,7 @@ const PlatformSettings   = require('../models/PlatformSettings');
 const UserSubscription   = require('../models/UserSubscription');
 const { createNotification } = require('./notificationController');
 const { processJobStages } = require('../services/jobNotifier');
+const { getPostingBlock, startPaymentOnComplete, recordWalletEntries } = require('./paymentController');
 
 const RADII_KM = [6, 15, 30];
 
@@ -38,6 +39,17 @@ const getEarlyAccessContext = async (userId) => {
 
 const createJob = async (req, res) => {
   try {
+    // Payment rule: a poster with an unconfirmed worker payment cannot post.
+    const block = await getPostingBlock(req.user);
+    if (block.blocked) {
+      return res.status(403).json({
+        success: false,
+        code: 'PAYMENT_PENDING',
+        pending: block.pending,
+        message: 'Confirm your pending worker payment (enter the worker\'s code) before posting a new job.',
+      });
+    }
+
     const { title, skill, description, city, area, wage, workersNeeded, duration, startDate, startTime, jobType, urgentWithinHours, lat, lng } = req.body;
 
     const location = { city, area };
@@ -77,6 +89,33 @@ const createJob = async (req, res) => {
 };
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+
+// ── Phone numbers ─────────────────────────────────────────────────────────
+// A phone number only travels to someone who is allowed to call: the poster and an
+// accepted worker, while the pair's chat/call is open (accepted and not yet paid).
+// Everyone else — other workers, anonymous visitors, a pair whose job is closed —
+// gets the profile with no phone.
+const idOf = (x) => String((x && x._id) || x);
+const contactOpen = (a) => !!(a && a.chatUnlocked && !a.contactClosed);
+
+const scrubJob = (o, viewerId) => {
+  const me = viewerId ? String(viewerId) : null;
+  const iAmPoster = !!me && me === idOf(o.postedBy);
+  const myApp = me ? (o.applicants || []).find(a => idOf(a.worker) === me) : null;
+  if (o.postedBy && o.postedBy.phone !== undefined && !(myApp && contactOpen(myApp))) {
+    o.postedBy = { ...o.postedBy, phone: undefined };
+  }
+  o.applicants = (o.applicants || []).map(a => {
+    if (a.worker && a.worker.phone !== undefined) {
+      const isMe = !!me && idOf(a.worker) === me;
+      if (!isMe && !(iAmPoster && contactOpen(a))) a.worker = { ...a.worker, phone: undefined };
+    }
+    return a;
+  });
+  return o;
+};
+const scrubMany = (docs, viewerId) => docs.map(d => scrubJob(d.toObject ? d.toObject() : d, viewerId));
 
 const getJobs = async (req, res) => {
   try {
@@ -134,7 +173,7 @@ const getJobs = async (req, res) => {
         .map(id => jobs.find(j => j._id.toString() === id.toString()))
         .filter(Boolean)
         .map(job => {
-          const obj = job.toObject();
+          const obj = scrubJob(job.toObject(), req.user?._id);
           obj.distanceKm = Math.round((distanceById.get(job._id.toString()) / 1000) * 10) / 10;
           return obj;
         });
@@ -156,7 +195,7 @@ const getJobs = async (req, res) => {
       .populate('postedBy', 'name phone').populate('applicants.worker', 'name phone')
       .sort({ jobType: -1, createdAt: -1 }).skip(skip).limit(Number(limit));
 
-    res.status(200).json({ success: true, total, page: Number(page), pages: Math.ceil(total / limit), jobs, geoSearch: false });
+    res.status(200).json({ success: true, total, page: Number(page), pages: Math.ceil(total / limit), jobs: scrubMany(jobs, req.user?._id), geoSearch: false });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -166,7 +205,7 @@ const getMyAppliedJobs = async (req, res) => {
   try {
     const jobs = await Job.find({ 'applicants.worker': req.user._id, 'applicants.status': 'accepted' })
       .populate('postedBy', 'name phone').populate('applicants.worker', 'name phone').sort({ createdAt: -1 });
-    res.status(200).json({ success: true, jobs });
+    res.status(200).json({ success: true, jobs: scrubMany(jobs, req.user._id) });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -189,7 +228,7 @@ const getUrgentJobs = async (req, res) => {
 
     const jobs = await Job.find(query)
       .populate('postedBy', 'name phone').populate('applicants.worker', 'name phone').sort({ createdAt: -1 });
-    res.status(200).json({ success: true, jobs });
+    res.status(200).json({ success: true, jobs: scrubMany(jobs, req.user?._id) });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -199,7 +238,8 @@ const getJobById = async (req, res) => {
   try {
     const job = await Job.findById(req.params.id).populate('postedBy', 'name phone').populate('applicants.worker', 'name phone');
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
-    res.status(200).json({ success: true, job });
+    const out = scrubJob(job.toObject(), req.user?._id);
+    res.status(200).json({ success: true, job: out });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -207,7 +247,8 @@ const getJobById = async (req, res) => {
 
 const getMyJobs = async (req, res) => {
   try {
-    const jobs = await Job.find({ postedBy: req.user._id }).populate('applicants.worker', 'name phone profilePhoto').sort({ createdAt: -1 });
+    const found = await Job.find({ postedBy: req.user._id }).populate('applicants.worker', 'name phone profilePhoto').sort({ createdAt: -1 });
+    const jobs = scrubMany(found, req.user._id);
     res.status(200).json({ success: true, jobs });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -223,7 +264,12 @@ const getMyWork = async (req, res) => {
       return {
         _id: job._id, title: job.title, skill: job.skill, location: job.location, wage: job.wage,
         duration: job.duration, startDate: job.startDate, startTime: job.startTime, status: job.status,
-        postedBy: job.postedBy, jobType: job.jobType,
+        postedBy: job.postedBy && contactOpen(myApp)
+          ? job.postedBy
+          : job.postedBy && { _id: job.postedBy._id, name: job.postedBy.name },   // no phone once contact is closed
+        jobType: job.jobType,
+        paymentStatus: myApp?.paymentStatus || 'none',
+        contactClosed: !!myApp?.contactClosed,
         workStatus: myApp?.workStatus || 'not_started',
         workStartedAt: myApp?.workStartedAt || null, workCompletedAt: myApp?.workCompletedAt || null,
       };
@@ -244,7 +290,7 @@ const getJobHistory = async (req, res) => {
         const myApp = job.applicants.find(a => a.worker.toString() === req.user._id.toString() && a.workStatus === 'completed');
         return {
           jobId: job._id, title: job.title, skill: job.skill, location: job.location, wage: job.wage,
-          completedAt: myApp?.workCompletedAt || job.updatedAt, otherParty: job.postedBy, direction: 'earned',
+          completedAt: myApp?.workCompletedAt || job.updatedAt, otherParty: contactOpen(myApp) ? job.postedBy : job.postedBy && { _id: job.postedBy._id, name: job.postedBy.name }, direction: 'earned',
         };
       });
     } else {
@@ -255,7 +301,7 @@ const getJobHistory = async (req, res) => {
           if (a.workStatus === 'completed') {
             history.push({
               jobId: job._id, title: job.title, skill: job.skill, location: job.location, wage: job.wage,
-              completedAt: a.workCompletedAt || job.updatedAt, otherParty: a.worker, direction: 'paid',
+              completedAt: a.workCompletedAt || job.updatedAt, otherParty: contactOpen(a) ? a.worker : a.worker && { _id: a.worker._id, name: a.worker.name }, direction: 'paid',
             });
           }
         }
@@ -334,6 +380,11 @@ const updateApplicantStatus = async (req, res) => {
 
     const applicant = job.applicants.find(a => a.worker._id.toString() === req.params.workerId);
     if (!applicant) return res.status(404).json({ success: false, message: 'Applicant not found' });
+
+    // Finished / closed pairs can never be re-opened (would bring chat back).
+    if (applicant.contactClosed || applicant.workStatus === 'completed') {
+      return res.status(400).json({ success: false, message: 'This job is already finished.' });
+    }
 
     if (status === 'accepted') {
       const acceptedCount = job.applicants.filter(a => a.status === 'accepted').length;
@@ -432,18 +483,21 @@ const completeWork = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Work must be started before completing' });
     }
 
+    const pay = await startPaymentOnComplete();
+
     applicant.workStatus      = 'completed';
     applicant.workCompletedAt = new Date();
+    if (pay.enabled) {
+      applicant.paymentStatus = 'pending';
+      applicant.paymentOtp    = pay.otp;
+      applicant.paymentOtpAttempts = 0;
+    }
     await job.save();
 
-    try {
-      const wage = Number(job.wage) || 0;
-      if (wage > 0) {
-        await Transaction.create({ user: applicant.worker._id, type: 'credit', amount: wage, job: job._id, counterparty: req.user._id, note: `Earned for "${job.title}"` });
-        await Transaction.create({ user: req.user._id, type: 'debit', amount: wage, job: job._id, counterparty: applicant.worker._id, note: `Paid for "${job.title}"` });
-      }
-    } catch (walletErr) {
-      console.error('Wallet record error:', walletErr.message);
+    // OTP on  -> wallet rows are written when the poster enters the code.
+    // OTP off -> old behaviour, written right away.
+    if (!pay.enabled) {
+      await recordWalletEntries(job, applicant.worker._id, req.user._id);
     }
 
     try {
@@ -454,12 +508,19 @@ const completeWork = async (req, res) => {
       recipient: applicant.worker._id,
       type:  'work_completed',
       title: 'Work completed! ✅',
-      body:  `${req.user.name} marked "${job.title}" as completed. ₹${job.wage} added to your wallet records. Don't forget to rate them!`,
-      link:  '/wallet',
+      body:  pay.enabled
+        ? `${req.user.name} marked "${job.title}" as completed. After you receive ₹${job.wage}, open the job and give them your payment code.`
+        : `${req.user.name} marked "${job.title}" as completed. ₹${job.wage} added to your wallet records. Don't forget to rate them!`,
+      link:  pay.enabled ? '/my-work' : '/wallet',
       meta: { actorName: req.user.name, jobTitle: job.title, amount: job.wage },
     });
 
-    res.status(200).json({ success: true, message: 'Work marked as completed', workStatus: 'completed' });
+    res.status(200).json({
+      success: true,
+      message: pay.enabled ? 'Work completed. Enter the worker\'s payment code to finish.' : 'Work marked as completed',
+      workStatus: 'completed',
+      paymentPending: !!pay.enabled,
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

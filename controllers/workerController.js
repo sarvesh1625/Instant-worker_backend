@@ -134,7 +134,7 @@ const searchWorkers = async (req, res) => {
 const getWorkerById = async (req, res) => {
   try {
     const worker = await User.findOne({ _id: req.params.id, role: 'worker' })
-      .select('name phone profilePhoto city area bio languages worker isVerified idVerification.status createdAt');
+      .select('name profilePhoto city area bio languages worker isVerified idVerification.status createdAt');   // no phone: this route is public. Phones only travel through the chat/job endpoints that check the pair is allowed to talk.
 
     if (!worker) {
       return res.status(404).json({ success: false, message: 'Worker not found' });

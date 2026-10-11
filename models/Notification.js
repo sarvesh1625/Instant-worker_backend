@@ -9,6 +9,7 @@ const notificationSchema = new mongoose.Schema({
       'new_message', 'new_review', 'job_closed',
       'work_started', 'work_completed',
       'urgent_job', 'urgent_filled',
+      'payment_confirmed', 'posting_allowed',
     ],
     required: true,
   },

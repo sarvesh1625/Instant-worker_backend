@@ -12,6 +12,9 @@ const {
 const {
   getAllSkillsAdmin, createSkill, updateSkill, deleteSkill,
 } = require('../controllers/skillController');
+const {
+  adminListPending, adminResolvePayment, adminSetPostingOverride, adminTogglePaymentOtp,
+} = require('../controllers/paymentController');
 const { protect } = require('../middleware/auth');
 const { adminOnly } = require('../middleware/adminAuth');
 const { getSettings, toggleSubscriptions } = require('../controllers/platformSettingsController');
@@ -68,5 +71,11 @@ router.get('/subscriptions',            getAllSubscriptions);
 router.post('/subscriptions/grant',     grantSubscription);
 router.post('/subscriptions/:id/cancel', adminCancelSubscription);
 router.get('/leaderboard', getLeaderboard);
+
+// Payment-OTP controls
+router.get('/payments',                             adminListPending);
+router.patch('/payments/:jobId/:workerId/resolve',  adminResolvePayment);
+router.patch('/users/:id/posting-override',         adminSetPostingOverride);
+router.patch('/settings/payment-otp',               adminTogglePaymentOtp);
 
 module.exports = router;

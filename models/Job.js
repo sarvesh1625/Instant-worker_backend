@@ -69,6 +69,20 @@ const JobSchema = new mongoose.Schema({
 
     chatUnlocked: { type: Boolean, default: false },
     autoAccepted: { type: Boolean, default: false },
+
+    // ── Payment confirmation (OTP) ─────────────────────────────────────
+    // 'none'      = old flow / feature off / work not completed yet
+    // 'pending'   = work completed, poster has not entered the worker's OTP
+    // 'confirmed' = OTP entered (or admin resolved) -> contact is closed
+    paymentStatus:   { type: String, enum: ['none', 'pending', 'confirmed'], default: 'none' },
+    // select:false -> never returned by normal queries, so the poster (and the
+    // public GET /jobs/:id) can never see it. Read only with '+applicants.paymentOtp'.
+    paymentOtp:      { type: String, select: false },
+    paymentOtpAttempts: { type: Number, default: 0 },
+    paymentLockedUntil: { type: Date },
+    paymentConfirmedAt: { type: Date },
+    paymentResolvedByAdmin: { type: Boolean, default: false },
+    contactClosed:   { type: Boolean, default: false },
   }],
 
 }, { timestamps: true });

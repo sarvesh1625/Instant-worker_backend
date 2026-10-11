@@ -8,6 +8,9 @@ const mongoose = require('mongoose');
 const platformSettingsSchema = new mongoose.Schema({
   subscriptionsEnabled: { type: Boolean, default: false }, // OFF by default — matches "same as of now" until admin flips it
   earlyAccessMinutes:   { type: Number, default: 15 },      // how many minutes non-subscribed workers are delayed by
+  // Master switch for the payment-OTP rule (poster must enter the worker's OTP
+  // before posting again; contact closes after). OFF = old behaviour.
+  paymentOtpEnabled:    { type: Boolean, default: true },
   enabledAt:            { type: Date },
   enabledBy:             { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });

@@ -74,6 +74,12 @@ const userSchema = new mongoose.Schema({
 
   otp: { code: String, expiresAt: Date },
 
+  // Admin can let a poster create jobs even while a worker payment is still
+  // unconfirmed. Default false = normal rule (pending payment blocks posting).
+  postingOverride:   { type: Boolean, default: false },
+  postingOverrideBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  postingOverrideAt: { type: Date },
+
 }, { timestamps: true });
 
 userSchema.index({ 'worker.location': '2dsphere' });

@@ -1,11 +1,15 @@
 const Notification = require('../models/Notification');
+const { pushToUser } = require('../services/pushService');
 
-const createNotification = async ({ recipient, type, title, body, link }) => {
+// Saves the in-app notification AND sends a phone push. Neither can throw.
+const createNotification = async ({ recipient, type, title, body, link, meta }) => {
   try {
-    await Notification.create({ recipient, type, title, body, link });
+    await Notification.create({ recipient, type, title, body, link, meta });
   } catch (err) {
     console.error('Notification error:', err.message);
   }
+  // Not awaited: the caller shouldn't wait on Expo's servers.
+  pushToUser(recipient, { type, title, body, link, meta }).catch(() => {});
 };
 
 const getNotifications = async (req, res) => {

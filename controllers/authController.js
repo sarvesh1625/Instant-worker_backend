@@ -1,7 +1,7 @@
 const User = require('../models/User');
-const Otp  = require('../models/Otp');
 const jwt = require('jsonwebtoken');
-const axios = require('axios'); // NEW dependency — run `npm install axios` in /server
+const axios = require('axios');
+const { sendOtp, verifyOtp, normalizePhone } = require('../services/otpService');
 
 // Generate JWT token
 const generateToken = (id) => {
@@ -10,99 +10,55 @@ const generateToken = (id) => {
   });
 };
 
-// ── OTP delivery (LEGACY custom-OTP flow) ────────────────────────────────────
-// Superseded by the MSG91 widget flow below (verifyWidgetTokenAndRegister),
-// but left in place since Otp.js and the /verify-otp re-verification route
-// for EXISTING users still use it. Safe to keep both systems running.
-const isTestMode = () => process.env.OTP_MODE !== 'production';
+const sendFailure = (res, err) =>
+  res.status(err.status || 500).json({ success: false, message: err.status ? err.message : 'Could not send OTP' });
 
+// ── Registration OTP (real SMS via MSG91) ────────────────────────────────────
 const sendRegisterOtp = async (req, res) => {
   try {
-    const { phone } = req.body;
-
-    if (!phone || !/^\d{10}$/.test(phone.trim())) {
+    const phone = normalizePhone(req.body.phone);
+    if (!phone) {
       return res.status(400).json({ success: false, message: 'Enter a valid 10-digit mobile number' });
     }
-
-    const existing = await User.findOne({ phone: phone.trim() });
-    if (existing) {
+    if (await User.findOne({ phone })) {
       return res.status(400).json({ success: false, message: 'This number is already registered. Please login instead.' });
     }
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    await Otp.findOneAndUpdate(
-      { phone: phone.trim() },
-      { phone: phone.trim(), code, attempts: 0, expiresAt },
-      { upsert: true, new: true }
-    );
-
-    if (isTestMode()) {
-      console.log(`[TEST MODE] Registration OTP for ${phone}: ${code}`);
-      return res.status(200).json({ success: true, message: 'OTP sent (test mode)', otp_dev: code });
+    const r = await sendOtp(phone, 'reg');
+    if (!r.sent) {
+      return res.status(429).json({
+        success: false,
+        message: r.reason === 'cooldown' ? 'Please wait 30 seconds before requesting another OTP.'
+                                         : 'Too many OTP requests for this number. Try again in an hour.',
+      });
     }
-
-    res.status(200).json({ success: true, message: 'OTP sent to your mobile number' });
+    res.status(200).json({ success: true, message: 'OTP sent to your mobile number', ...(r.devCode && { otp_dev: r.devCode }) });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendFailure(res, error);
   }
 };
 
 const register = async (req, res) => {
   try {
-    const { name, phone, email, password, role, otp } = req.body;
+    const { name, email, password, role, otp } = req.body;
+    const phone = normalizePhone(req.body.phone);
+    if (!phone) return res.status(400).json({ success: false, message: 'Enter a valid 10-digit mobile number' });
+    if (!otp)   return res.status(400).json({ success: false, message: 'OTP is required' });
 
-    if (!otp) {
-      return res.status(400).json({ success: false, message: 'OTP is required' });
-    }
-
-    const existing = await User.findOne({ phone });
-    if (existing) {
+    if (await User.findOne({ phone })) {
       return res.status(400).json({ success: false, message: 'Phone already registered' });
     }
 
-    const otpDoc = await Otp.findOne({ phone: phone?.trim() });
+    const v = await verifyOtp(phone, 'reg', otp);
+    if (!v.ok) return res.status(400).json({ success: false, message: v.message });
 
-    if (!otpDoc) {
-      return res.status(400).json({ success: false, message: 'No OTP found. Please request a new one.' });
-    }
-    if (otpDoc.expiresAt < Date.now()) {
-      await Otp.deleteOne({ _id: otpDoc._id });
-      return res.status(400).json({ success: false, message: 'OTP expired. Please request a new one.' });
-    }
-    if (otpDoc.attempts >= 5) {
-      await Otp.deleteOne({ _id: otpDoc._id });
-      return res.status(400).json({ success: false, message: 'Too many wrong attempts. Please request a new OTP.' });
-    }
-    if (otpDoc.code !== otp.trim()) {
-      otpDoc.attempts += 1;
-      await otpDoc.save();
-      const left = 5 - otpDoc.attempts;
-      return res.status(400).json({
-        success: false,
-        message: `Wrong OTP. ${left} attempt${left !== 1 ? 's' : ''} remaining.`,
-      });
-    }
-
-    await Otp.deleteOne({ _id: otpDoc._id });
-
-    const user = await User.create({
-      name, phone, email, password, role,
-      isVerified: true,
-    });
+    const user = await User.create({ name, phone, email, password, role, isVerified: true });
     const token = generateToken(user._id);
 
     res.status(201).json({
       success: true,
       token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        phone: user.phone,
-        role: user.role,
-        isVerified: user.isVerified,
-      },
+      user: { _id: user._id, name: user.name, phone: user.phone, role: user.role, isVerified: user.isVerified },
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -271,104 +227,66 @@ const getMe = async (req, res) => {
   }
 };
 
+// Logged-in re-verification of the user's OWN number (phone comes from the token, not the body)
 const sendOTP = async (req, res) => {
   try {
-    const { phone } = req.body;
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    await User.findOneAndUpdate({ phone }, { otp: { code: otp, expiresAt } });
-
-    if (isTestMode()) {
-      console.log(`[TEST MODE] OTP for ${phone}: ${otp}`);
-      return res.status(200).json({ success: true, message: 'OTP sent (test mode)', otp_dev: otp });
-    }
-
+    const r = await sendOtp(req.user.phone, 'verify');
+    if (!r.sent) return res.status(429).json({ success: false, message: 'Please wait before requesting another OTP.' });
     res.status(200).json({ success: true, message: 'OTP sent' });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendFailure(res, error);
   }
 };
 
 const verifyOTP = async (req, res) => {
   try {
-    const { phone, otp } = req.body;
-    const user = await User.findOne({ phone });
-
-    if (!user || !user.otp || !user.otp.code) {
-      return res.status(400).json({ success: false, message: 'No OTP found. Request a new one.' });
-    }
-    if (user.otp.code !== otp) {
-      return res.status(400).json({ success: false, message: 'Invalid OTP' });
-    }
-    if (user.otp.expiresAt < Date.now()) {
-      return res.status(400).json({ success: false, message: 'OTP has expired. Request a new one.' });
-    }
-
-    user.isVerified = true;
-    user.otp = undefined;
-    await user.save();
-
+    const v = await verifyOtp(req.user.phone, 'verify', req.body.otp);
+    if (!v.ok) return res.status(400).json({ success: false, message: v.message });
+    await User.updateOne({ _id: req.user._id }, { $set: { isVerified: true } });
     res.status(200).json({ success: true, message: 'Phone verified successfully!' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// ── Forgot password (NEW) ─────────────────────────────────────────────────
-// Same user.otp pattern as sendOTP/verifyOTP above, and the same
-// isTestMode() dev-console-log pattern as sendRegisterOtp above.
+// ── Forgot password ──────────────────────────────────────────────────────────
+// Always answers the same way whether or not the number is registered.
 const forgotPasswordSendOtp = async (req, res) => {
   try {
-    const { phone } = req.body;
-    const user = await User.findOne({ phone });
+    const phone = normalizePhone(req.body.phone);
+    if (!phone) return res.status(400).json({ success: false, message: 'Enter a valid 10-digit mobile number' });
 
-    // Deliberately vague either way — don't reveal whether a phone number
-    // is actually registered (basic enumeration-attack hygiene)
-    if (!user) {
-      return res.status(200).json({
-        success: true,
-        message: 'If that number is registered, an OTP has been sent.',
-      });
+    const user = await User.findOne({ phone }).select('_id');
+    let sent;
+    if (user) {
+      try { sent = await sendOtp(phone, 'reset'); }
+      catch (e) { return sendFailure(res, e); }   // delivery problem is not account-specific, safe to report
     }
-
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    user.otp = { code, expiresAt };
-    await user.save();
-
-    if (isTestMode()) {
-      console.log(`[TEST MODE] Password reset OTP for ${phone}: ${code}`);
-      return res.status(200).json({ success: true, message: 'OTP sent (test mode)', otp_dev: code });
-    }
-
-    res.status(200).json({ success: true, message: 'OTP sent.' });
+    res.status(200).json({ success: true, message: 'If that number is registered, an OTP has been sent.', ...(sent?.devCode && { otp_dev: sent.devCode }) });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ success: false, message: 'Could not send OTP' });
   }
 };
 
 const resetPassword = async (req, res) => {
   try {
-    const { phone, otp, newPassword } = req.body;
+    const phone = normalizePhone(req.body.phone);
+    const { otp, newPassword } = req.body;
 
-    if (!newPassword || newPassword.length < 6) {
+    if (!phone) return res.status(400).json({ success: false, message: 'Enter a valid 10-digit mobile number' });
+    if (typeof newPassword !== 'string' || newPassword.length < 6) {
       return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
     }
 
     const user = await User.findOne({ phone });
-    if (!user || !user.otp || !user.otp.code) {
-      return res.status(400).json({ success: false, message: 'Invalid or expired OTP. Request a new one.' });
-    }
-    if (user.otp.code !== otp) {
-      return res.status(400).json({ success: false, message: 'Invalid OTP' });
-    }
-    if (user.otp.expiresAt < Date.now()) {
-      return res.status(400).json({ success: false, message: 'OTP has expired. Request a new one.' });
-    }
+    if (!user) return res.status(400).json({ success: false, message: 'Invalid or expired OTP. Request a new one.' });
 
-    user.password = newPassword; // pre-save hook hashes this automatically
-    user.otp = undefined;
+    const v = await verifyOtp(phone, 'reset', otp);
+    if (!v.ok) return res.status(400).json({ success: false, message: v.message });
+
+    user.password = newPassword; // pre-save hook hashes it
+    user.loginAttempts = 0;
+    user.lockUntil = null;
     await user.save();
 
     res.status(200).json({ success: true, message: 'Password reset successfully. Please log in.' });
