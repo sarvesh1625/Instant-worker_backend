@@ -167,6 +167,8 @@ async function verifyOtp(phone, purpose, code) {
     const a = Buffer.from(hash(key, c)), b = Buffer.from(doc.code);
     match = a.length === b.length && crypto.timingSafeEqual(a, b);
   }
+
+  
   if (!match) {
     // atomic increment so parallel guesses can't dodge the limit
     const upd = await Otp.findOneAndUpdate({ phone: key }, { $inc: { attempts: 1 } }, { new: true });
