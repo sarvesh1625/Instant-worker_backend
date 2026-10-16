@@ -9,7 +9,15 @@ cloudinary.config({
 
 const addPortfolio = async (req, res) => {
   try {
-    const { title, description, skill, completedAt } = req.body;
+    const { description, skill, completedAt } = req.body;
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ success: false, message: 'Please add at least one photo' });
+    }
+    // The mobile app uploads photos only, so the title is optional here: use what was sent,
+    // else the description, else a generic one — never fail the upload over a missing title.
+    const title = String(req.body.title || '').trim().slice(0, 100)
+      || String(description || '').trim().slice(0, 100)
+      || (skill ? `${skill} work` : 'My work');
     const images = [];
     if (req.files && req.files.length > 0) {
       for (const file of req.files) {
@@ -21,7 +29,7 @@ const addPortfolio = async (req, res) => {
       }
     }
     const portfolio = await Portfolio.create({
-      worker: req.user._id, title, description, skill, images, completedAt: completedAt || Date.now(),
+      worker: req.user._id, title, description: description ? String(description).slice(0, 300) : undefined, skill: skill || undefined, images, completedAt: completedAt || Date.now(),
     });
     res.status(201).json({ success: true, portfolio });
   } catch (error) {

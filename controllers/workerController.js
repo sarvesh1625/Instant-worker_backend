@@ -89,7 +89,10 @@ const searchWorkers = async (req, res) => {
     const match = { role: 'worker', accountStatus: 'active' };
 
     if (skill && skill.trim()) {
-      match['worker.skill'] = { $regex: `^${escapeRegex(skill.trim())}$`, $options: 'i' };
+      // "Helper" = does any general labour work, so Labour and Helper show each other's workers.
+      const wanted = skill.trim();
+      const group = /^(labour|helper)$/i.test(wanted) ? ['Labour', 'Helper'] : [wanted];
+      match['worker.skill'] = { $regex: `^(${group.map(escapeRegex).join('|')})$`, $options: 'i' };
     }
     if (availability === 'true')  match['worker.availability'] = true;
     if (availability === 'false') match['worker.availability'] = false;

@@ -1,7 +1,7 @@
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
-const { sendOtp, verifyOtp, normalizePhone } = require('../services/otpService');
+const { sendOtp, verifyOtp, normalizePhone, otpLength } = require('../services/otpService');
 
 // Generate JWT token
 const generateToken = (id) => {
@@ -32,7 +32,7 @@ const sendRegisterOtp = async (req, res) => {
                                          : 'Too many OTP requests for this number. Try again in an hour.',
       });
     }
-    res.status(200).json({ success: true, message: 'OTP sent to your mobile number', ...(r.devCode && { otp_dev: r.devCode }) });
+    res.status(200).json({ success: true, message: 'OTP sent to your mobile number', otpLength: otpLength(), ...(r.devCode && { otp_dev: r.devCode }) });
   } catch (error) {
     sendFailure(res, error);
   }
@@ -65,94 +65,99 @@ const register = async (req, res) => {
   }
 };
 
-// ── OTP delivery (NEW — MSG91 widget flow) ───────────────────────────────────
-// The client-side widget (Msg91OtpWidget.jsx) handles sending/entering the
-// OTP entirely in its own popup, and hands back a verified access token.
-// This endpoint takes that token, verifies it SERVER-SIDE against MSG91
-// using the account authkey (never exposed to the browser), extracts the
-// MSG91-confirmed phone number, and only then creates the account.
-//
-// ⚠️ Confirm the exact response field name MSG91 returns the verified number
-// under (commonly `message`, sometimes nested) against your live dashboard
-// response before relying on this in production — test with a real OTP run
-// and console.log the raw response once to be certain.
+// ── MSG91 widget flow (web widget AND mobile app widget) ─────────────────────
+// The client runs the OTP flow with MSG91 directly and gets back an access
+// token. The server never trusts a client-supplied phone: it verifies the token
+// with MSG91 (using the secret authkey) and takes the phone from MSG91's answer.
+const decodeJwtPayload = (t) => {
+  try { return JSON.parse(Buffer.from(String(t).split('.')[1], 'base64url').toString('utf8')); }
+  catch { return null; }
+};
+const to10 = (v) => {
+  const d = String(v ?? '').replace(/\D/g, '');
+  const n = d.length === 12 && d.startsWith('91') ? d.slice(2) : d;
+  return /^\d{10}$/.test(n) ? n : null;
+};
+
+async function phoneFromWidgetToken(accessToken) {
+  const fail = (status, message) => { const e = new Error(message); e.status = status; return e; };
+  if (typeof accessToken !== 'string' || !accessToken) throw fail(400, 'Missing verification token');
+  if (!process.env.MSG91_AUTHKEY) throw fail(500, 'Server is not configured for phone verification. Contact support.');
+
+  let data;
+  try {
+    ({ data } = await axios.post('https://control.msg91.com/api/v5/widget/verifyAccessToken', {
+      authkey: process.env.MSG91_AUTHKEY,
+      'access-token': accessToken,
+    }, { timeout: 10000 }));
+  } catch (err) {
+    console.error('MSG91 verify error:', err.response?.data || err.message);
+    throw fail(502, 'Could not reach verification service. Please try again.');
+  }
+
+  if (data?.type !== 'success') {
+    console.error('MSG91 verifyAccessToken rejected:', JSON.stringify(data));
+    throw fail(400, `Phone verification failed: ${data?.message || 'unknown reason from MSG91'}`);
+  }
+
+  // Where MSG91 puts the verified number can vary: try the response, then the (already
+  // MSG91-validated) token's own payload. If none yields a phone we FAIL CLOSED.
+  const p = decodeJwtPayload(accessToken) || {};
+  const phone = [data.message, data.identifier, data.mobile, data.data?.identifier, data.data?.mobile,
+                 p.identifier, p.mobile, p.mobileNumber, p.phone, p.number]
+    .map(to10).find(Boolean);
+  if (!phone) {
+    console.error('MSG91 verify OK but no phone found. RAW:', JSON.stringify(data), 'TOKEN KEYS:', Object.keys(p));
+    throw fail(400, 'Could not read the verified phone number. Please contact support.');
+  }
+  return phone;
+}
+
+const widgetFailure = (res, err) =>
+  res.status(err.status || 500).json({ success: false, message: err.message });
+
 const verifyWidgetTokenAndRegister = async (req, res) => {
   try {
     const { accessToken, name, password, role, email } = req.body;
+    const phone = await phoneFromWidgetToken(accessToken);
 
-    if (!accessToken) {
-      return res.status(400).json({ success: false, message: 'Missing verification token' });
-    }
-    if (!process.env.MSG91_AUTHKEY) {
-      return res.status(500).json({ success: false, message: 'Server is not configured for phone verification. Contact support.' });
-    }
-
-    // ── Verify the token with MSG91 — this is the step that actually
-    // proves the OTP was really sent and really verified, not just trusted
-    // from the browser. ──
-    let verifiedPhone;
-    try {
-      const msgRes = await axios.post('https://control.msg91.com/api/v5/widget/verifyAccessToken', {
-        authkey: process.env.MSG91_AUTHKEY,
-        'access-token': accessToken,
-      });
-
-      if (msgRes.data?.type !== 'success') {
-        // Log the RAW response so we can see exactly what MSG91 said —
-        // this was previously silent, which is why the client only ever
-        // saw a generic "Phone verification failed" message.
-        console.error('MSG91 verifyAccessToken rejected:', JSON.stringify(msgRes.data));
-        return res.status(400).json({
-          success: false,
-          message: `Phone verification failed: ${msgRes.data?.message || 'unknown reason from MSG91'}`,
-        });
-      }
-
-      // MSG91 typically returns the verified identifier (often prefixed
-      // with country code, e.g. "9199XXXXXXXX") in `message`. Strip a
-      // leading "91" country code if present, to match this app's
-      // 10-digit phone storage format.
-      let raw = String(msgRes.data.message || '').trim();
-      verifiedPhone = raw.length === 12 && raw.startsWith('91') ? raw.slice(2) : raw;
-
-      if (!/^\d{10}$/.test(verifiedPhone)) {
-        console.error('MSG91 verify succeeded but phone could not be parsed. Raw response:', JSON.stringify(msgRes.data));
-        return res.status(400).json({ success: false, message: 'Could not read a valid verified phone number from MSG91.' });
-      }
-    } catch (msgErr) {
-      console.error('MSG91 verify error:', msgErr.response?.data || msgErr.message);
-      return res.status(502).json({ success: false, message: 'Could not reach verification service. Please try again.' });
-    }
-
-    // ── Now proceed exactly like the old register(), but using the
-    // SERVER-VERIFIED phone number — never a client-supplied one. ──
-    const existing = await User.findOne({ phone: verifiedPhone });
-    if (existing) {
+    if (await User.findOne({ phone })) {
       return res.status(400).json({ success: false, message: 'This number is already registered. Please login instead.' });
     }
     if (!name || !password || !role) {
       return res.status(400).json({ success: false, message: 'Name, password, and role are required' });
     }
 
-    const user = await User.create({
-      name, phone: verifiedPhone, email, password, role,
-      isVerified: true,
-    });
+    const user = await User.create({ name, phone, email, password, role, isVerified: true });
     const token = generateToken(user._id);
-
     res.status(201).json({
-      success: true,
-      token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        phone: user.phone,
-        role: user.role,
-        isVerified: user.isVerified,
-      },
+      success: true, token,
+      user: { _id: user._id, name: user.name, phone: user.phone, role: user.role, isVerified: user.isVerified },
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    widgetFailure(res, error);
+  }
+};
+
+// Forgot password via widget: token proves the phone; no OTP is stored on our side.
+const resetPasswordWithWidget = async (req, res) => {
+  try {
+    const { accessToken, newPassword } = req.body;
+    if (typeof newPassword !== 'string' || newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+    }
+    const phone = await phoneFromWidgetToken(accessToken);
+
+    const user = await User.findOne({ phone });
+    if (!user) return res.status(400).json({ success: false, message: 'No account found for this number.' });
+
+    user.password = newPassword;
+    user.loginAttempts = 0;
+    user.lockUntil = null;
+    await user.save();
+    res.status(200).json({ success: true, message: 'Password reset successfully. Please log in.' });
+  } catch (error) {
+    widgetFailure(res, error);
   }
 };
 
@@ -262,7 +267,7 @@ const forgotPasswordSendOtp = async (req, res) => {
       try { sent = await sendOtp(phone, 'reset'); }
       catch (e) { return sendFailure(res, e); }   // delivery problem is not account-specific, safe to report
     }
-    res.status(200).json({ success: true, message: 'If that number is registered, an OTP has been sent.', ...(sent?.devCode && { otp_dev: sent.devCode }) });
+    res.status(200).json({ success: true, message: 'If that number is registered, an OTP has been sent.', otpLength: otpLength(), ...(sent?.devCode && { otp_dev: sent.devCode }) });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Could not send OTP' });
   }
@@ -298,5 +303,5 @@ const resetPassword = async (req, res) => {
 module.exports = {
   register, login, getMe, sendOTP, verifyOTP, sendRegisterOtp,
   verifyWidgetTokenAndRegister,
-  forgotPasswordSendOtp, resetPassword,
+  forgotPasswordSendOtp, resetPassword, resetPasswordWithWidget,
 };

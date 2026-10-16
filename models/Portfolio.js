@@ -5,10 +5,7 @@ const portfolioSchema = new mongoose.Schema({
   title: { type: String, required: true, trim: true, maxlength: 100 },
   description: { type: String, maxlength: 300 },
   images: [{ url: String, publicId: String }],
-  skill: {
-    type: String,
-    enum: ['Labour','Painter','Carpenter','Electrician','Mechanic','Farmer','Driver','Plumber','Welder','Other'],
-  },
+  skill: { type: String, trim: true },   // free text: skills are managed in Admin, so no fixed list here
   completedAt: { type: Date, default: Date.now },
 }, { timestamps: true });
 

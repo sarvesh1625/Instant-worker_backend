@@ -9,6 +9,8 @@ const {
 const {
   getMyPaymentOtp, confirmPayment, getOngoing, getPostingStatus,
 } = require('../controllers/paymentController');
+const { acceptAll, startAll, broadcast } = require('../controllers/crewController');
+const { getMyStartCode } = require('../controllers/startCodeController');
 const { protect, authorize } = require('../middleware/auth');
 const { optionalAuth } = require('../middleware/optionalAuth');
 
@@ -28,8 +30,12 @@ router.post('/:id/apply',                                   protect, authorize('
 router.patch('/:id/applicants/:workerId',                   protect, updateApplicantStatus);
 router.patch('/:id/applicants/:workerId/start-work',        protect, startWork);
 router.patch('/:id/applicants/:workerId/complete-work',     protect, completeWork);
+router.get('/:id/start-code',                                 protect, authorize('worker'), getMyStartCode);
 router.get('/:id/payment-otp',                               protect, authorize('worker'), getMyPaymentOtp);
 router.post('/:id/applicants/:workerId/confirm-payment',    protect, authorize('user'), confirmPayment);
+router.patch('/:id/accept-all',                             protect, authorize('user'), acceptAll);
+router.patch('/:id/start-all',                              protect, authorize('user'), startAll);
+router.post('/:id/broadcast',                               protect, authorize('user'), broadcast);
 router.patch('/:id/close',                                  protect, closeJob);
 
 module.exports = router;

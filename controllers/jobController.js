@@ -6,6 +6,7 @@ const UserSubscription   = require('../models/UserSubscription');
 const { createNotification } = require('./notificationController');
 const { processJobStages } = require('../services/jobNotifier');
 const { getPostingBlock, startPaymentOnComplete, recordWalletEntries } = require('./paymentController');
+const { startCodeRequired, checkStartCode, clearStartCode } = require('./startCodeController');
 
 const RADII_KM = [6, 15, 30];
 
@@ -50,7 +51,7 @@ const createJob = async (req, res) => {
       });
     }
 
-    const { title, skill, description, city, area, wage, workersNeeded, duration, startDate, startTime, jobType, urgentWithinHours, lat, lng } = req.body;
+    const { title, skill, description, city, area, wage, workersNeeded, duration, startDate, startTime, jobType, urgentWithinHours, lat, lng, autoAccept } = req.body;
 
     const location = { city, area };
     const latNum = parseFloat(lat);
@@ -70,6 +71,7 @@ const createJob = async (req, res) => {
     const job = await Job.create({
       postedBy: req.user._id, title, skill, description, location,
       wage, workersNeeded, duration, startDate, startTime, jobType: jobType || 'regular',
+      autoAccept: !!autoAccept && Number(workersNeeded) > 1 && (jobType || 'regular') !== 'urgent',
       urgentWithinHours: urgentWithinHours || 2,
     });
 
@@ -328,26 +330,43 @@ const applyToJob = async (req, res) => {
       return res.status(400).json({ success: false, message: 'This job is already fully staffed' });
     }
 
-    if (job.jobType === 'urgent') {
-      job.applicants.push({
-        worker:       req.user._id,
-        status:       'accepted',
-        workStatus:   'not_started',
-        chatUnlocked: true,
-        autoAccepted: true,
-      });
-      await job.save();
-
-      const newAcceptedCount = job.applicants.filter(a => a.status === 'accepted').length;
-      if (newAcceptedCount >= job.workersNeeded) {
-        job.status = 'closed';
-        await job.save();
+    if (job.jobType === 'urgent' || job.autoAccept) {
+      // Atomic "claim a seat": the check (seats left, not already applied, job open) and the
+      // insert happen in ONE database operation, so 15 workers tapping Apply at the same
+      // moment can never fill more than workersNeeded seats.
+      const claimed = await Job.findOneAndUpdate(
+        {
+          _id: job._id,
+          status: 'open',
+          'applicants.worker': { $ne: req.user._id },
+          $expr: { $lt: [
+            { $size: { $filter: { input: '$applicants', cond: { $eq: ['$$this.status', 'accepted'] } } } },
+            '$workersNeeded',
+          ] },
+        },
+        { $push: { applicants: {
+            worker: req.user._id, status: 'accepted', workStatus: 'not_started',
+            chatUnlocked: true, autoAccepted: true, appliedAt: new Date(),
+        } } },
+        { new: true }
+      );
+      if (!claimed) {
+        return res.status(400).json({ success: false, message: 'Sorry, this job just got filled or is no longer open.' });
       }
 
+      const filled = claimed.applicants.filter(a => a.status === 'accepted').length;
+      if (filled >= claimed.workersNeeded) {
+        await Job.updateOne({ _id: claimed._id, status: 'open' }, { $set: { status: 'closed' } });
+      }
+
+      const urgent = job.jobType === 'urgent';
       await createNotification({
-        recipient: job.postedBy._id, type: 'urgent_filled', title: 'Urgent job — worker confirmed! ⚡',
-        body: `${req.user.name} accepted your urgent job "${job.title}" and is on the way. Chat is open now.`,
-        link: `/chat/${req.user._id}`,
+        recipient: job.postedBy._id, type: urgent ? 'urgent_filled' : 'job_applied',
+        title: urgent ? 'Urgent job — worker confirmed! ⚡' : `Worker joined (${filled}/${claimed.workersNeeded}) ✅`,
+        body: urgent
+          ? `${req.user.name} accepted your urgent job "${job.title}" and is on the way. Chat is open now.`
+          : `${req.user.name} joined your job "${job.title}" — ${filled} of ${claimed.workersNeeded} workers confirmed.`,
+        link: urgent ? `/chat/${req.user._id}` : `/jobs/${job._id}`,
         meta: { actorName: req.user.name, jobTitle: job.title },
       });
 
@@ -450,9 +469,17 @@ const startWork = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Work already completed' });
     }
 
+    // Start code (START_CODE=on): the poster must type the code the worker shows in their app.
+    const codeOn = startCodeRequired();
+    if (codeOn) {
+      const chk = await checkStartCode(job._id, req.params.workerId, req.body && req.body.otp);
+      if (!chk.ok) return res.status(chk.status).json({ success: false, code: chk.code, message: chk.message });
+    }
+
     applicant.workStatus    = 'in_progress';
     applicant.workStartedAt = new Date();
     await job.save();
+    if (codeOn) await clearStartCode(job._id, req.params.workerId).catch(() => {});
 
     await createNotification({
       recipient: applicant.worker._id,

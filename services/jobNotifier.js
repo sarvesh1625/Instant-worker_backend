@@ -12,7 +12,8 @@ const { createNotification } = require('../controllers/notificationController');
 //   Stage 3: workers within 25 km  — 15 minutes after the job was posted
 //   Nobody beyond 25 km is ever notified.
 //
-// Who is notified: role worker, active account, SAME skill as the job, and
+// Who is notified: role worker, active account, SAME skill as the job (Helpers also match
+// Labour jobs), NOT currently in the middle of another job, and
 // worker.availability === true (switched "Online"). A worker with no stored
 // location can't be placed in a radius, so they get nothing until they tap
 // Go Online in the app (that call stores their GPS point).
@@ -44,6 +45,13 @@ const SCALE = Number(process.env.NOTIFY_TIME_SCALE) > 0 ? Number(process.env.NOT
 const EARTH_RADIUS_KM = 6378.1;
 const SCHEDULER_INTERVAL_MS = 30 * 1000;
 
+// A "Helper" is a worker who does any general labour work. Helpers receive alerts for
+// Labour jobs and Helper jobs; Labour workers also receive Helper jobs.
+// (Create a skill named exactly "Helper" in Admin → Skills.)
+const HELPER = 'Helper';
+const GENERAL = ['Labour', HELPER];
+const skillsFor = (jobSkill) => (GENERAL.includes(jobSkill) ? GENERAL : [jobSkill]);
+
 const escapeRegex = (str) => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // Pure helper — when is a stage due for an audience? (exported for testing)
@@ -63,7 +71,7 @@ const findEligibleWorkers = async (job, stageIndex) => {
   const base = {
     role: 'worker',
     accountStatus: 'active',
-    'worker.skill': job.skill,
+    'worker.skill': { $in: skillsFor(job.skill) },
     'worker.availability': true,
   };
 
@@ -87,6 +95,25 @@ const findEligibleWorkers = async (job, stageIndex) => {
   }).select('_id');
 };
 
+// A worker who is in the middle of a job (accepted + work started, not yet completed)
+// gets NO new-job alerts. As soon as they complete it they are eligible again — the
+// check runs each time a stage is sent, so nothing needs to be "switched back on".
+const withoutBusy = async (workers) => {
+  if (workers.length === 0) return workers;
+  const rows = await Job.aggregate([
+    { $match: { 'applicants.worker': { $in: workers.map(w => w._id) } } },
+    { $unwind: '$applicants' },
+    { $match: {
+        'applicants.worker': { $in: workers.map(w => w._id) },
+        'applicants.status': 'accepted',
+        'applicants.workStatus': 'in_progress',
+    } },
+    { $group: { _id: '$applicants.worker' } },
+  ]);
+  const busy = new Set(rows.map(r => String(r._id)));
+  return workers.filter(w => !busy.has(String(w._id)));
+};
+
 // Keeps only the workers that belong to this audience.
 const filterByAudience = async (workers, audience, enabled) => {
   if (!enabled) return audience === 'premium' ? workers : [];
@@ -105,7 +132,7 @@ const sendStage = async (job, audience, stageIndex, enabled) => {
   // Never notify the same worker twice for one job, across stages/audiences.
   // (urgentNotifiedWorkers is the existing field — it now tracks every job type.)
   const already = new Set((job.urgentNotifiedWorkers || []).map(id => id.toString()));
-  const fresh = candidates.filter(w => !already.has(w._id.toString()));
+  const fresh = await withoutBusy(candidates.filter(w => !already.has(w._id.toString())));
 
   const targets = await filterByAudience(fresh, audience, enabled);
   if (targets.length === 0) return;

@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 const otpSchema = new mongoose.Schema({
   phone:         { type: String, required: true, unique: true, trim: true },
   code:          { type: String, required: true },
+  reqId:         { type: String, default: null }, // MSG91 widget request id (widget mode only)
   attempts:      { type: Number, default: 0 },
   codeExpiresAt: { type: Date },                 // when the current code stops working
   lastSentAt:    { type: Date },                 // resend cooldown

@@ -47,6 +47,9 @@ const JobSchema = new mongoose.Schema({
 
   wage: { type: Number },
   workersNeeded: { type: Number, default: 1 },
+  // First come, first served: workers who apply are accepted automatically until
+  // workersNeeded are filled (used for crews, e.g. "I need 15 workers today").
+  autoAccept:    { type: Boolean, default: false },
 
   status: {
     type: String,
@@ -83,6 +86,11 @@ const JobSchema = new mongoose.Schema({
     paymentConfirmedAt: { type: Date },
     paymentResolvedByAdmin: { type: Boolean, default: false },
     contactClosed:   { type: Boolean, default: false },
+
+    // ── Start code (worker shows 4 digits, poster types them to start the work) ──
+    startOtp:         { type: String, select: false },
+    startOtpAttempts: { type: Number, default: 0 },
+    startLockedUntil: { type: Date },
   }],
 
 }, { timestamps: true });
