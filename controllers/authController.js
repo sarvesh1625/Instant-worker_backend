@@ -82,12 +82,13 @@ const to10 = (v) => {
 async function phoneFromWidgetToken(accessToken) {
   const fail = (status, message) => { const e = new Error(message); e.status = status; return e; };
   if (typeof accessToken !== 'string' || !accessToken) throw fail(400, 'Missing verification token');
-  if (!process.env.MSG91_AUTHKEY) throw fail(500, 'Server is not configured for phone verification. Contact support.');
+  const authkey = String(process.env.MSG91_AUTHKEY || '').trim();   // a stray space/newline from copy-paste breaks it
+  if (!authkey) throw fail(500, 'Server is not configured for phone verification. Contact support.');
 
   let data;
   try {
     ({ data } = await axios.post('https://control.msg91.com/api/v5/widget/verifyAccessToken', {
-      authkey: process.env.MSG91_AUTHKEY,
+      authkey,
       'access-token': accessToken,
     }, { timeout: 10000 }));
   } catch (err) {
@@ -96,7 +97,7 @@ async function phoneFromWidgetToken(accessToken) {
   }
 
   if (data?.type !== 'success') {
-    console.error('MSG91 verifyAccessToken rejected:', JSON.stringify(data));
+    console.error('MSG91 verifyAccessToken rejected:', JSON.stringify(data), `| server authkey: ${authkey.length} chars, starts "${authkey.slice(0, 6)}", ends "${authkey.slice(-4)}"`);
     throw fail(400, `Phone verification failed: ${data?.message || 'unknown reason from MSG91'}`);
   }
 
