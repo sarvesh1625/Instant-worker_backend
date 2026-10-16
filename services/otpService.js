@@ -33,15 +33,19 @@ const tokenAuth = () => String(process.env.MSG91_TOKEN_AUTH || '').trim();
 const widgetOn  = () => !!(widgetId() && tokenAuth()) && !isDevMode();
 const otpLength = () => (widgetOn() ? (parseInt(process.env.MSG91_OTP_LENGTH, 10) || 4) : 6);
 
+// OTP_DEBUG=on (temporary!) puts MSG91's own reason into the error text, so a failed send can be diagnosed without logs.
+const debugOn = () => String(process.env.OTP_DEBUG || '').toLowerCase() === 'on';
+
 async function widgetCall(path, body) {
   try {
     const r = await axios.post(`https://control.msg91.com/api/v5/widget/${path}`,
       { widgetId: widgetId(), tokenAuth: tokenAuth(), ...body },
       { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000, validateStatus: () => true });
-    return r.data || {};
+    // If MSG91 (or something in front of it) answers with a web page instead of JSON, keep a short piece of it.
+    return (r.data && typeof r.data === 'object') ? r.data : { type: 'error', message: `HTTP ${r.status} ${String(r.data || '').slice(0, 100)}` };
   } catch (err) {
     console.error('MSG91 widget network error:', path, err.message);
-    const e = new Error('Could not reach the SMS service. Please try again.'); e.status = 502; throw e;
+    const e = new Error(debugOn() ? `Could not reach MSG91: ${err.message}` : 'Could not reach the SMS service. Please try again.'); e.status = 502; throw e;
   }
 }
 
@@ -49,7 +53,8 @@ async function widgetSend(phone) {
   const d = await widgetCall('sendOtpMobile', { identifier: `91${phone}` });
   if (d.type !== 'success' || typeof d.message !== 'string' || !d.message) {
     console.error('MSG91 widget send rejected:', JSON.stringify(d));
-    const e = new Error('Could not send SMS. Please try again.'); e.status = 502; throw e;
+    const why = String(d.message || d.type || 'no reply').slice(0, 150);
+    const e = new Error(debugOn() ? `MSG91 refused to send: ${why}` : 'Could not send SMS. Please try again.'); e.status = 502; throw e;
   }
   return d.message; // reqId
 }
