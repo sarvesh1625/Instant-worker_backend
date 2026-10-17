@@ -71,7 +71,8 @@ const findEligibleWorkers = async (job, stageIndex) => {
   const base = {
     role: 'worker',
     accountStatus: 'active',
-    'worker.skill': { $in: skillsFor(job.skill) },
+    // main skill OR any extra skill the worker added
+    $or: [{ 'worker.skill': { $in: skillsFor(job.skill) } }, { 'worker.skills': { $in: skillsFor(job.skill) } }],
     'worker.availability': true,
   };
 

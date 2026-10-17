@@ -92,7 +92,9 @@ const searchWorkers = async (req, res) => {
       // "Helper" = does any general labour work, so Labour and Helper show each other's workers.
       const wanted = skill.trim();
       const group = /^(labour|helper)$/i.test(wanted) ? ['Labour', 'Helper'] : [wanted];
-      match['worker.skill'] = { $regex: `^(${group.map(escapeRegex).join('|')})$`, $options: 'i' };
+      // A worker can have several skills: match their main skill OR any of the others.
+      const rx = { $regex: `^(${group.map(escapeRegex).join('|')})$`, $options: 'i' };
+      match.$and = [{ $or: [{ 'worker.skill': rx }, { 'worker.skills': rx }] }];
     }
     if (availability === 'true')  match['worker.availability'] = true;
     if (availability === 'false') match['worker.availability'] = false;
@@ -180,7 +182,7 @@ const getMyWorkerProfile = async (req, res) => {
 
 const upsertWorkerProfile = async (req, res) => {
   try {
-    const { skill, experience, city, area, wage, description, availability, languages } = req.body;
+    const { skill, skills, experience, city, area, wage, description, availability, languages } = req.body;
 
     const user = await User.findById(req.user._id);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
@@ -197,6 +199,11 @@ const upsertWorkerProfile = async (req, res) => {
         : String(languages).split(',').map(l => l.trim()).filter(Boolean);
     }
 
+    if (Array.isArray(skills)) {
+      const clean = [...new Set(skills.filter(x => typeof x === 'string').map(x => x.replace(/[\u0000-\u001f<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40)).filter(Boolean))].slice(0, 8);
+      user.worker.skills = clean;
+      if (clean.length && skill === undefined) user.worker.skill = clean[0];
+    }
     if (skill        !== undefined) user.worker.skill        = skill;
     if (experience   !== undefined) user.worker.experience   = Number(experience) || 0;
     if (wage         !== undefined) user.worker.wagePerDay   = Number(wage) || 0;

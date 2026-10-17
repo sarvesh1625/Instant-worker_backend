@@ -10,6 +10,31 @@ const generateToken = (id) => {
   });
 };
 
+// Only these two roles can be created through sign-up. (Before this, whatever "role" the request
+// carried was saved as-is, so anyone could have registered themselves as an admin.)
+const ALLOWED_ROLES = ['worker', 'user'];
+
+// Skills a worker picked: a list of short plain-text names (built-in ones and any typed under "Other").
+const cleanSkills = (input) => {
+  const arr = Array.isArray(input) ? input : (typeof input === 'string' && input ? [input] : []);
+  const out = [], seen = new Set();
+  for (const raw of arr) {
+    if (typeof raw !== 'string') continue;
+    const s = raw.replace(/[\u0000-\u001f<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    const k = s.toLowerCase();
+    if (!s || seen.has(k)) continue;
+    seen.add(k); out.push(s);
+    if (out.length >= 8) break;
+  }
+  return out;
+};
+// worker.skill = the first pick (main skill, used by job matching today); worker.skills = all picks.
+const workerFields = (role, body) => {
+  if (role !== 'worker') return {};
+  const skills = cleanSkills(Array.isArray(body.skills) && body.skills.length ? body.skills : body.skill);
+  return skills.length ? { worker: { skill: skills[0], skills } } : {};
+};
+
 const sendFailure = (res, err) =>
   res.status(err.status || 500).json({ success: false, message: err.status ? err.message : 'Could not send OTP' });
 
@@ -41,6 +66,7 @@ const sendRegisterOtp = async (req, res) => {
 const register = async (req, res) => {
   try {
     const { name, email, password, role, otp } = req.body;
+    if (!ALLOWED_ROLES.includes(role)) return res.status(400).json({ success: false, message: 'Choose whether you want work or want to hire' });
     const phone = normalizePhone(req.body.phone);
     if (!phone) return res.status(400).json({ success: false, message: 'Enter a valid 10-digit mobile number' });
     if (!otp)   return res.status(400).json({ success: false, message: 'OTP is required' });
@@ -52,7 +78,7 @@ const register = async (req, res) => {
     const v = await verifyOtp(phone, 'reg', otp);
     if (!v.ok) return res.status(400).json({ success: false, message: v.message });
 
-    const user = await User.create({ name, phone, email, password, role, isVerified: true });
+    const user = await User.create({ name, phone, email, password, role, isVerified: true, ...workerFields(role, req.body) });
     const token = generateToken(user._id);
 
     res.status(201).json({
@@ -128,8 +154,9 @@ const verifyWidgetTokenAndRegister = async (req, res) => {
     if (!name || !password || !role) {
       return res.status(400).json({ success: false, message: 'Name, password, and role are required' });
     }
+    if (!ALLOWED_ROLES.includes(role)) return res.status(400).json({ success: false, message: 'Choose whether you want work or want to hire' });
 
-    const user = await User.create({ name, phone, email, password, role, isVerified: true });
+    const user = await User.create({ name, phone, email, password, role, isVerified: true, ...workerFields(role, req.body) });
     const token = generateToken(user._id);
     res.status(201).json({
       success: true, token,
@@ -305,4 +332,5 @@ module.exports = {
   register, login, getMe, sendOTP, verifyOTP, sendRegisterOtp,
   verifyWidgetTokenAndRegister,
   forgotPasswordSendOtp, resetPassword, resetPasswordWithWidget,
+  _cleanSkills: cleanSkills,
 };

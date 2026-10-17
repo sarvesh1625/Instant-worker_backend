@@ -39,8 +39,12 @@ const updateMyProfile = async (req, res) => {
     }
 
     if (user.role === 'worker') {
+      if (Array.isArray(skills)) {
+        const clean = [...new Set(skills.filter(x => typeof x === 'string').map(x => x.replace(/[\u0000-\u001f<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40)).filter(Boolean))].slice(0, 8);
+        user.worker.skills = clean;
+        if (clean.length && skill === undefined) user.worker.skill = clean[0];
+      }
       if (skill        !== undefined) user.worker.skill        = skill;
-      if (skills       !== undefined) user.worker.skills       = skills;
       if (experience   !== undefined) user.worker.experience   = experience;
       if (wagePerDay   !== undefined) user.worker.wagePerDay   = wagePerDay;
       if (availability !== undefined) user.worker.availability = availability;
