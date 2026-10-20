@@ -58,7 +58,8 @@ async function widgetCall(path, body) {
       catch (err) { if (host === HOSTS[HOSTS.length - 1] && !first) throw err; continue; }
       if (!hostRefusal(d)) return d;          // success, or a normal answer such as "wrong OTP"
       console.error(`MSG91 widget ${path} refused on ${host}:`, JSON.stringify(d));
-      if (!first) first = d;
+      if (!first) first = { ...d, _all: [] };
+      first._all.push(`${host}: ${JSON.stringify(d).slice(0, 160)}`);
     }
     return first;
   } catch (err) {
@@ -71,7 +72,7 @@ async function widgetSend(phone) {
   const d = await widgetCall('sendOtpMobile', { identifier: `91${phone}` });
   if (d.type !== 'success' || typeof d.message !== 'string' || !d.message) {
     console.error('MSG91 widget send rejected:', JSON.stringify(d));
-    const why = String(d.message || d.type || 'no reply').slice(0, 150);
+    const why = d._all ? d._all.join(' || ') : String(d.message || d.type || 'no reply').slice(0, 150);
     const e = new Error(debugOn() ? `MSG91 refused to send: ${why}` : 'Could not send SMS. Please try again.'); e.status = 502; throw e;
   }
   return d.message; // reqId
