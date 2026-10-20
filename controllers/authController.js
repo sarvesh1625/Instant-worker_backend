@@ -111,14 +111,23 @@ async function phoneFromWidgetToken(accessToken) {
   const authkey = String(process.env.MSG91_AUTHKEY || '').trim();   // a stray space/newline from copy-paste breaks it
   if (!authkey) throw fail(500, 'Server is not configured for phone verification. Contact support.');
 
-  let data;
-  try {
-    ({ data } = await axios.post('https://control.msg91.com/api/v5/widget/verifyAccessToken', {
-      authkey,
-      'access-token': accessToken,
-    }, { timeout: 10000 }));
-  } catch (err) {
-    console.error('MSG91 verify error:', err.response?.data || err.message);
+  // Documented form first (api.msg91.com, authkey in the header); the older form (control host, authkey in body) as a fallback.
+  const attempts = [
+    () => axios.post('https://api.msg91.com/api/v5/widget/verifyAccessToken', { 'access-token': accessToken },
+      { headers: { authkey, 'Content-Type': 'application/json' }, timeout: 10000, validateStatus: () => true }),
+    () => axios.post('https://control.msg91.com/api/v5/widget/verifyAccessToken', { authkey, 'access-token': accessToken },
+      { timeout: 10000, validateStatus: () => true }),
+  ];
+  let data, lastErr;
+  for (const go of attempts) {
+    try {
+      const r = await go();
+      data = (r.data && typeof r.data === 'object') ? r.data : { type: 'error', message: `HTTP ${r.status}` };
+      if (data.type === 'success') break;
+    } catch (err) { lastErr = err; }
+  }
+  if (!data) {
+    console.error('MSG91 verify error:', lastErr?.message);
     throw fail(502, 'Could not reach verification service. Please try again.');
   }
 

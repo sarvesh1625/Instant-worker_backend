@@ -36,13 +36,31 @@ const otpLength = () => (widgetOn() ? (parseInt(process.env.MSG91_OTP_LENGTH, 10
 // OTP_DEBUG=on (temporary!) puts MSG91's own reason into the error text, so a failed send can be diagnosed without logs.
 const debugOn = () => String(process.env.OTP_DEBUG || '').toLowerCase() === 'on';
 
+// MSG91's own docs use api.msg91.com; the dashboard host control.msg91.com is what we tested from a PC.
+// If one host answers with an IP/"Invalid request"-type refusal, the other is tried once.
+const HOSTS = ['control.msg91.com', 'api.msg91.com'];
+const hostRefusal = (d) => d?.type === 'error' && /invalid request|ipblocked|authenticationfailure|^HTTP /i.test(String(d.message || ''));
+
+async function widgetCallOn(host, path, body) {
+  const r = await axios.post(`https://${host}/api/v5/widget/${path}`,
+    { widgetId: widgetId(), tokenAuth: tokenAuth(), ...body },
+    { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000, validateStatus: () => true });
+  // If MSG91 (or something in front of it) answers with a web page instead of JSON, keep a short piece of it.
+  return (r.data && typeof r.data === 'object') ? r.data : { type: 'error', message: `HTTP ${r.status} ${String(r.data || '').slice(0, 100)}` };
+}
+
 async function widgetCall(path, body) {
   try {
-    const r = await axios.post(`https://control.msg91.com/api/v5/widget/${path}`,
-      { widgetId: widgetId(), tokenAuth: tokenAuth(), ...body },
-      { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000, validateStatus: () => true });
-    // If MSG91 (or something in front of it) answers with a web page instead of JSON, keep a short piece of it.
-    return (r.data && typeof r.data === 'object') ? r.data : { type: 'error', message: `HTTP ${r.status} ${String(r.data || '').slice(0, 100)}` };
+    let first = null;
+    for (const host of HOSTS) {
+      let d;
+      try { d = await widgetCallOn(host, path, body); }
+      catch (err) { if (host === HOSTS[HOSTS.length - 1] && !first) throw err; continue; }
+      if (!hostRefusal(d)) return d;          // success, or a normal answer such as "wrong OTP"
+      console.error(`MSG91 widget ${path} refused on ${host}:`, JSON.stringify(d));
+      if (!first) first = d;
+    }
+    return first;
   } catch (err) {
     console.error('MSG91 widget network error:', path, err.message);
     const e = new Error(debugOn() ? `Could not reach MSG91: ${err.message}` : 'Could not reach the SMS service. Please try again.'); e.status = 502; throw e;
@@ -167,8 +185,6 @@ async function verifyOtp(phone, purpose, code) {
     const a = Buffer.from(hash(key, c)), b = Buffer.from(doc.code);
     match = a.length === b.length && crypto.timingSafeEqual(a, b);
   }
-
-  
   if (!match) {
     // atomic increment so parallel guesses can't dodge the limit
     const upd = await Otp.findOneAndUpdate({ phone: key }, { $inc: { attempts: 1 } }, { new: true });
