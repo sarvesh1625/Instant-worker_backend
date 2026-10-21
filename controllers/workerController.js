@@ -5,7 +5,7 @@ const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // ─────────────────────────────────────────────────────────────────────────────
 // Worker search
 //
-//  • With the user's coordinates (lat/lng): only workers within 150 km are
+//  • With the user's coordinates (lat/lng): only workers within 100 km are
 //    returned — anyone farther away, or who has no stored location, is hidden.
 //  • Best-rated workers first. A plain average would let ONE 5-star review beat
 //    a worker with 60 reviews averaging 4.8, so the score pulls small samples
@@ -18,7 +18,7 @@ const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // Results only contain public profile fields. They NEVER include the worker's
 // phone number or exact GPS point — only a rounded `distanceKm`.
 // ─────────────────────────────────────────────────────────────────────────────
-const SEARCH_RADIUS_METERS = 150 * 1000;   // 150 km
+const SEARCH_RADIUS_METERS = (Number(process.env.SEARCH_RADIUS_KM) || 100) * 1000;   // 100 km (override with SEARCH_RADIUS_KM)
 const RATING_PRIOR_MEAN = 4.0;
 const RATING_PRIOR_WEIGHT = 3;
 
