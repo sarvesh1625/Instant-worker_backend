@@ -39,7 +39,9 @@ const startPaymentOnComplete = async () => {
 
 const recordWalletEntries = async (job, workerId, posterId, note = '') => {
   try {
-    const wage = Number(job.wage) || 0;
+    // A team leader is paid for the whole team: wage x crewSize.
+    const mine = (job.applicants || []).find(a => String((a.worker && a.worker._id) || a.worker) === String(workerId));
+    const wage = (Number(job.wage) || 0) * Math.max(1, Number(mine && mine.crewSize) || 1);
     if (wage > 0) {
       await Transaction.create({ user: workerId, type: 'credit', amount: wage, job: job._id, counterparty: posterId, note: `Earned for "${job.title}"${note}` });
       await Transaction.create({ user: posterId, type: 'debit', amount: wage, job: job._id, counterparty: workerId, note: `Paid for "${job.title}"${note}` });
@@ -79,7 +81,7 @@ const getMyPaymentOtp = async (req, res) => {
     }).select('+applicants.paymentOtp');
     if (!job) return res.status(404).json({ success: false, message: 'No payment waiting for this job' });
     const mine = job.applicants.find(a => a.worker.toString() === req.user._id.toString());
-    res.status(200).json({ success: true, otp: mine.paymentOtp, title: job.title, wage: job.wage });
+    res.status(200).json({ success: true, otp: mine.paymentOtp, title: job.title, wage: job.wage, crewSize: mine.crewSize || 1 });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -142,7 +144,7 @@ const confirmPayment = async (req, res) => {
       title: 'Payment confirmed ✅',
       body: `${req.user.name} confirmed payment for "${job.title}". Chat and call with this poster are now closed.`,
       link: '/wallet',
-      meta: { actorName: req.user.name, jobTitle: job.title, amount: job.wage },
+      meta: { actorName: req.user.name, jobTitle: job.title, amount: (Number(job.wage) || 0) * Math.max(1, Number((job.applicants.find(x => String((x.worker && x.worker._id) || x.worker) === String(workerId)) || {}).crewSize) || 1) },
     }).catch(() => {});
 
     res.status(200).json({ success: true, message: 'Payment confirmed. This job is closed.', contactClosed: true });
@@ -168,7 +170,7 @@ const getOngoing = async (req, res) => {
         const other = j.postedBy && j.postedBy.toObject ? j.postedBy.toObject() : j.postedBy;
         items.push({
           jobId: j._id, title: j.title, skill: j.skill, wage: j.wage, location: j.location,
-          workStatus: a.workStatus, paymentStatus: a.paymentStatus,
+          workStatus: a.workStatus, paymentStatus: a.paymentStatus, crewSize: a.crewSize || 1,
           other: other && { _id: other._id, name: other.name, profilePhoto: other.profilePhoto, phone: a.chatUnlocked ? other.phone : undefined },
           canChat: !!a.chatUnlocked,
         });
@@ -183,7 +185,7 @@ const getOngoing = async (req, res) => {
           const w = a.worker;
           items.push({
             jobId: j._id, title: j.title, skill: j.skill, wage: j.wage, location: j.location,
-            workStatus: a.workStatus, paymentStatus: a.paymentStatus,
+            workStatus: a.workStatus, paymentStatus: a.paymentStatus, crewSize: a.crewSize || 1,
             other: w && { _id: w._id, name: w.name, profilePhoto: w.profilePhoto, phone: a.chatUnlocked ? w.phone : undefined },
             canChat: !!a.chatUnlocked,
           });

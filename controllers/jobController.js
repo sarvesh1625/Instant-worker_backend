@@ -119,12 +119,21 @@ const scrubJob = (o, viewerId) => {
 };
 const scrubMany = (docs, viewerId) => docs.map(d => scrubJob(d.toObject ? d.toObject() : d, viewerId));
 
+// Jobs disappear from the workers' lists, and stop taking new applications, this many days after posting.
+// Work already accepted is not affected (it stays in My Work). Override with JOB_LIFETIME_DAYS in env.
+const JOB_LIFETIME_DAYS = Number(process.env.JOB_LIFETIME_DAYS) > 0 ? Number(process.env.JOB_LIFETIME_DAYS) : 4;
+const expiryCutoff = () => new Date(Date.now() - JOB_LIFETIME_DAYS * 24 * 60 * 60 * 1000);
+
+// Seats: an accepted applicant fills `crewSize` seats (a team leader brings several workers).
+const crewOf = (a) => Math.max(1, Number(a && a.crewSize) || 1);
+const seatsTaken = (job) => job.applicants.filter(a => a.status === 'accepted').reduce((n, a) => n + crewOf(a), 0);
+
 const getJobs = async (req, res) => {
   try {
     const { skill, city, jobType, page = 1, limit = 20, lat, lng } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
 
-    const baseMatch = { status: 'open' };
+    const baseMatch = { status: 'open', createdAt: { $gte: expiryCutoff() } };
     if (skill && skill.trim()) baseMatch.skill = { $regex: `^${escapeRegex(skill.trim())}$`, $options: 'i' };
     if (jobType) baseMatch.jobType = jobType;
 
@@ -134,7 +143,7 @@ const getJobs = async (req, res) => {
     }
     if (earlyAccess.enabled && !earlyAccess.isSubscribed) {
       const cutoff = new Date(Date.now() - earlyAccess.delayMinutes * 60 * 1000);
-      baseMatch.createdAt = { $lte: cutoff };
+      baseMatch.createdAt = { $gte: expiryCutoff(), $lte: cutoff };
     }
 
     const userLat = parseFloat(lat);
@@ -216,7 +225,7 @@ const getMyAppliedJobs = async (req, res) => {
 const getUrgentJobs = async (req, res) => {
   try {
     const { skill, city } = req.query;
-    const query = { status: 'open', jobType: 'urgent' };
+    const query = { status: 'open', jobType: 'urgent', createdAt: { $gte: expiryCutoff() } };
     if (skill && skill.trim()) query.skill = { $regex: `^${escapeRegex(skill.trim())}$`, $options: 'i' };
     if (city  && city.trim())  query['location.city'] = { $regex: escapeRegex(city.trim()), $options: 'i' };
 
@@ -224,7 +233,7 @@ const getUrgentJobs = async (req, res) => {
       const earlyAccess = await getEarlyAccessContext(req.user._id);
       if (earlyAccess.enabled && !earlyAccess.isSubscribed) {
         const cutoff = new Date(Date.now() - earlyAccess.delayMinutes * 60 * 1000);
-        query.createdAt = { $lte: cutoff };
+        query.createdAt = { $gte: expiryCutoff(), $lte: cutoff };
       }
     }
 
@@ -321,14 +330,22 @@ const applyToJob = async (req, res) => {
     const job = await Job.findById(req.params.id).populate('postedBy', 'name');
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
     if (job.status !== 'open') return res.status(400).json({ success: false, message: 'Job is no longer open' });
+    if (job.createdAt < expiryCutoff()) return res.status(400).json({ success: false, message: 'This job has expired' });
 
     const alreadyApplied = job.applicants.find(a => a.worker.toString() === req.user._id.toString());
     if (alreadyApplied) return res.status(400).json({ success: false, message: 'Already applied' });
 
-    const acceptedCount = job.applicants.filter(a => a.status === 'accepted').length;
-    if (acceptedCount >= job.workersNeeded) {
+    let crewSize = parseInt(req.body && req.body.crewSize, 10);
+    if (!Number.isFinite(crewSize) || crewSize < 1) crewSize = 1;
+    const taken = seatsTaken(job);
+    if (taken >= job.workersNeeded) {
       return res.status(400).json({ success: false, message: 'This job is already fully staffed' });
     }
+    const seatsLeft = job.workersNeeded - taken;
+    if (crewSize > seatsLeft) {
+      return res.status(400).json({ success: false, message: `Only ${seatsLeft} place${seatsLeft !== 1 ? 's' : ''} left — a team of ${crewSize} does not fit.` });
+    }
+    const teamText = crewSize > 1 ? ` (team of ${crewSize})` : '';
 
     if (job.jobType === 'urgent' || job.autoAccept) {
       // Atomic "claim a seat": the check (seats left, not already applied, job open) and the
@@ -339,14 +356,20 @@ const applyToJob = async (req, res) => {
           _id: job._id,
           status: 'open',
           'applicants.worker': { $ne: req.user._id },
-          $expr: { $lt: [
-            { $size: { $filter: { input: '$applicants', cond: { $eq: ['$$this.status', 'accepted'] } } } },
+          $expr: { $lte: [
+            { $add: [
+              { $sum: { $map: {
+                  input: { $filter: { input: '$applicants', cond: { $eq: ['$$this.status', 'accepted'] } } },
+                  as: 'a', in: { $ifNull: ['$$a.crewSize', 1] },
+              } } },
+              crewSize,
+            ] },
             '$workersNeeded',
           ] },
         },
         { $push: { applicants: {
             worker: req.user._id, status: 'accepted', workStatus: 'not_started',
-            chatUnlocked: true, autoAccepted: true, appliedAt: new Date(),
+            chatUnlocked: true, autoAccepted: true, appliedAt: new Date(), crewSize,
         } } },
         { new: true }
       );
@@ -354,7 +377,7 @@ const applyToJob = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Sorry, this job just got filled or is no longer open.' });
       }
 
-      const filled = claimed.applicants.filter(a => a.status === 'accepted').length;
+      const filled = seatsTaken(claimed);
       if (filled >= claimed.workersNeeded) {
         await Job.updateOne({ _id: claimed._id, status: 'open' }, { $set: { status: 'closed' } });
       }
@@ -364,8 +387,8 @@ const applyToJob = async (req, res) => {
         recipient: job.postedBy._id, type: urgent ? 'urgent_filled' : 'job_applied',
         title: urgent ? 'Urgent job — worker confirmed! ⚡' : `Worker joined (${filled}/${claimed.workersNeeded}) ✅`,
         body: urgent
-          ? `${req.user.name} accepted your urgent job "${job.title}" and is on the way. Chat is open now.`
-          : `${req.user.name} joined your job "${job.title}" — ${filled} of ${claimed.workersNeeded} workers confirmed.`,
+          ? `${req.user.name}${teamText} accepted your urgent job "${job.title}" and is on the way. Chat is open now.`
+          : `${req.user.name}${teamText} joined your job "${job.title}" — ${filled} of ${claimed.workersNeeded} workers confirmed.`,
         link: urgent ? `/chat/${req.user._id}` : `/jobs/${job._id}`,
         meta: { actorName: req.user.name, jobTitle: job.title },
       });
@@ -373,12 +396,12 @@ const applyToJob = async (req, res) => {
       return res.status(200).json({ success: true, message: "You're confirmed! Chat is now open.", autoAccepted: true });
     }
 
-    job.applicants.push({ worker: req.user._id });
+    job.applicants.push({ worker: req.user._id, crewSize });
     await job.save();
 
     await createNotification({
       recipient: job.postedBy._id, type: 'job_applied', title: 'New applicant!',
-      body: `${req.user.name} applied to your job: ${job.title}`, link: `/jobs/${job._id}`,
+      body: `${req.user.name}${teamText} applied to your job: ${job.title}`, link: `/jobs/${job._id}`,
       meta: { actorName: req.user.name, jobTitle: job.title },
     });
 
@@ -406,9 +429,12 @@ const updateApplicantStatus = async (req, res) => {
     }
 
     if (status === 'accepted') {
-      const acceptedCount = job.applicants.filter(a => a.status === 'accepted').length;
-      if (acceptedCount >= job.workersNeeded) {
+      const taken = seatsTaken(job);
+      if (taken >= job.workersNeeded) {
         return res.status(400).json({ success: false, message: 'This job is already fully staffed' });
+      }
+      if (taken + crewOf(applicant) > job.workersNeeded) {
+        return res.status(400).json({ success: false, message: `Not enough places left for this team of ${crewOf(applicant)}.` });
       }
     }
 
@@ -421,8 +447,7 @@ const updateApplicantStatus = async (req, res) => {
     await job.save();
 
     if (status === 'accepted') {
-      const newAcceptedCount = job.applicants.filter(a => a.status === 'accepted').length;
-      if (newAcceptedCount >= job.workersNeeded && job.status === 'open') {
+      if (seatsTaken(job) >= job.workersNeeded && job.status === 'open') {
         job.status = 'closed';
         await job.save();
       }

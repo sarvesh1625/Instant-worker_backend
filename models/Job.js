@@ -70,6 +70,10 @@ const JobSchema = new mongoose.Schema({
     workStartedAt:   { type: Date },
     workCompletedAt: { type: Date },
 
+    // Team leader ("mestri"): how many workers this applicant brings, INCLUDING themselves.
+    // 1 = an ordinary single worker. One team uses crewSize of the job's workersNeeded seats.
+    crewSize: { type: Number, default: 1, min: 1 },
+
     chatUnlocked: { type: Boolean, default: false },
     autoAccepted: { type: Boolean, default: false },
 

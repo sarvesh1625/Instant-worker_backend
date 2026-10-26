@@ -22,18 +22,21 @@ const acceptAll = async (req, res) => {
   try {
     const job = await loadOwnJob(req, res); if (!job) return;
 
-    const accepted = job.applicants.filter(a => a.status === 'accepted').length;
-    let seats = job.workersNeeded - accepted;
+    const crewOf = (x) => Math.max(1, Number(x && x.crewSize) || 1);
+    const taken = job.applicants.filter(a => a.status === 'accepted').reduce((n, a) => n + crewOf(a), 0);
+    let seats = job.workersNeeded - taken;
     if (seats <= 0) return res.status(400).json({ success: false, message: 'This job is already fully staffed' });
 
-    const pending = job.applicants
+    // First applied first; a team is accepted only if the whole team still fits.
+    const pending = [];
+    job.applicants
       .filter(a => a.status === 'pending' && !a.contactClosed)
       .sort((x, y) => new Date(x.appliedAt || 0) - new Date(y.appliedAt || 0))
-      .slice(0, seats);
-    if (pending.length === 0) return res.status(400).json({ success: false, message: 'No waiting applicants' });
+      .forEach(a => { if (crewOf(a) <= seats) { pending.push(a); seats -= crewOf(a); } });
+    if (pending.length === 0) return res.status(400).json({ success: false, message: 'No waiting applicants fit the places left' });
 
     pending.forEach(a => { a.status = 'accepted'; a.chatUnlocked = true; a.workStatus = 'not_started'; });
-    if (accepted + pending.length >= job.workersNeeded && job.status === 'open') job.status = 'closed';
+    if (seats <= 0 && job.status === 'open') job.status = 'closed';
     await job.save();
 
     await Promise.allSettled(pending.map(a => createNotification({
