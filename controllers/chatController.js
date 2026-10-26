@@ -1,29 +1,69 @@
 const Message = require('../models/Message');
 const Job     = require('../models/Job');
 const User    = require('../models/User');
-const { pushToUser } = require('../services/pushService');
+const DirectChat = require('../models/DirectChat');
+const Block   = require('../models/Block');
+const { createNotification } = require('./notificationController');
+
+const isBlocked = async (a, b) =>
+  !!(await Block.findOne({ $or: [{ blocker: a, blocked: b }, { blocker: b, blocked: a }] }));
+
+// Tell the other person about a new message — once per burst (not for every message while they have unread ones).
+const notifyNewMessage = async (req, receiverId, messageId, conversationId) => {
+  try {
+    const earlierUnread = await Message.countDocuments({
+      conversationId, sender: req.user._id, receiver: receiverId, read: false, _id: { $ne: messageId },
+    });
+    if (earlierUnread > 0) return;
+    await createNotification({
+      recipient: receiverId, type: 'new_message',
+      title: 'New message', body: `${req.user.name} sent you a message`,
+      link: `/chat/${req.user._id}`, meta: { actorName: req.user.name },
+    });
+  } catch {}
+};
 
 const canChat = async (userId1, userId2) => {
   const a = await Job.findOne({
     postedBy: userId1,
-    applicants: { $elemMatch: { worker: userId2, chatUnlocked: true, contactClosed: { $ne: true } } },
+    applicants: { $elemMatch: { worker: userId2, chatUnlocked: true } },
   });
   if (a) return true;
   const b = await Job.findOne({
     postedBy: userId2,
-    applicants: { $elemMatch: { worker: userId1, chatUnlocked: true, contactClosed: { $ne: true } } },
+    applicants: { $elemMatch: { worker: userId1, chatUnlocked: true } },
   });
-  return !!b;
+  if (b) return true;
+  // A chat the hirer started from the worker's profile (no job involved).
+  const pair = Message.getConversationId(userId1, userId2);
+  if (await DirectChat.findOne({ pair })) return !(await isBlocked(userId1, userId2));
+  return false;
+};
+
+// POST /api/chat/direct/:userId — a hirer opens a chat with a worker straight from the worker's profile.
+const startDirectChat = async (req, res) => {
+  try {
+    if (req.user.role !== 'user') {
+      return res.status(403).json({ success: false, message: 'Only people hiring can start a chat with a worker.' });
+    }
+    const worker = await User.findOne({ _id: req.params.userId, role: 'worker', accountStatus: 'active' }).select('_id');
+    if (!worker) return res.status(404).json({ success: false, message: 'Worker not found.' });
+    if (await isBlocked(req.user._id, worker._id)) {
+      return res.status(403).json({ success: false, message: 'You cannot contact this worker.' });
+    }
+    const pair = Message.getConversationId(req.user._id, worker._id);
+    await DirectChat.updateOne({ pair }, { $setOnInsert: { pair, hirer: req.user._id, worker: worker._id } }, { upsert: true });
+    res.status(200).json({ success: true, allowed: true });
+  } catch (error) {
+    res.status(400).json({ success: false, message: 'Could not start the chat.' });
+  }
 };
 
 const checkAccess = async (req, res) => {
   try {
     const allowed = await canChat(req.user._id.toString(), req.params.userId);
     const other = await User.findById(req.params.userId).select('name phone profilePhoto role');
-    // Never hand out a phone number once chat/call access is closed.
-    const otherOut = other ? other.toObject() : null;
-    if (otherOut && !allowed) delete otherOut.phone;
-    res.status(200).json({ success: true, allowed, otherUser: otherOut });
+    res.status(200).json({ success: true, allowed, otherUser: other || null });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -50,12 +90,9 @@ const getConversations = async (req, res) => {
         const other    = isSender ? receiver : sender;
         const unread = await Message.countDocuments({ conversationId: conv._id, receiver: userId, read: false });
         const preview = msg.type === 'voice' ? '🎤 Voice message' : msg.text;
-        const open = await canChat(userId.toString(), other._id.toString());
         return {
           conversationId: conv._id,
-          // No phone number once chat/call is closed.
-          otherUser: { _id: other._id, name: other.name, phone: open ? other.phone : undefined, profilePhoto: other.profilePhoto },
-          closed: !open,
+          otherUser: { _id: other._id, name: other.name, phone: other.phone, profilePhoto: other.profilePhoto },
           lastMessage: preview, lastTime: msg.createdAt, unread,
         };
       })
@@ -70,7 +107,7 @@ const getConversations = async (req, res) => {
 const getMessages = async (req, res) => {
   try {
     const allowed = await canChat(req.user._id.toString(), req.params.userId);
-    if (!allowed) return res.status(403).json({ success: false, message: 'Chat is not available. It opens when you are accepted for a job and closes once the job is paid.' });
+    if (!allowed) return res.status(403).json({ success: false, message: 'Chat not unlocked yet.' });
 
     const conversationId = Message.getConversationId(req.user._id, req.params.userId);
     const messages = await Message.find({ conversationId })
@@ -88,7 +125,7 @@ const getMessages = async (req, res) => {
 const sendMessage = async (req, res) => {
   try {
     const allowed = await canChat(req.user._id.toString(), req.params.userId);
-    if (!allowed) return res.status(403).json({ success: false, message: 'Chat is closed for this job.' });
+    if (!allowed) return res.status(403).json({ success: false, message: 'Chat not unlocked.' });
 
     const { text } = req.body;
     if (!text || !text.trim()) return res.status(400).json({ success: false, message: 'Message cannot be empty' });
@@ -97,12 +134,7 @@ const sendMessage = async (req, res) => {
     const message = await Message.create({ conversationId, sender: req.user._id, receiver: req.params.userId, type: 'text', text: text.trim() });
     await message.populate('sender', 'name phone profilePhoto');
     await message.populate('receiver', 'name phone profilePhoto');
-
-    // Phone alert for the other person (no in-app notification row — that would flood the list).
-    pushToUser(req.params.userId, {
-      type: 'new_message', title: req.user.name, body: text.trim().slice(0, 140),
-      link: `/chat/${req.user._id}`, meta: { actorName: req.user.name },
-    }).catch(() => {});
+    notifyNewMessage(req, req.params.userId, message._id, conversationId);
 
     res.status(201).json({ success: true, message });
   } catch (error) {
@@ -113,7 +145,7 @@ const sendMessage = async (req, res) => {
 const sendVoiceMessage = async (req, res) => {
   try {
     const allowed = await canChat(req.user._id.toString(), req.params.userId);
-    if (!allowed) return res.status(403).json({ success: false, message: 'Chat is closed for this job.' });
+    if (!allowed) return res.status(403).json({ success: false, message: 'Chat not unlocked.' });
 
     const cloudinary = require('cloudinary').v2;
     const result = await cloudinary.uploader.upload(req.file.path, {
@@ -127,6 +159,7 @@ const sendVoiceMessage = async (req, res) => {
       type: 'voice', voiceUrl: result.secure_url, voiceDuration: req.body.duration || 0,
     });
     await message.populate('sender', 'name phone profilePhoto');
+    notifyNewMessage(req, req.params.userId, message._id, conversationId);
 
     res.status(201).json({ success: true, message });
   } catch (error) {
@@ -134,4 +167,4 @@ const sendVoiceMessage = async (req, res) => {
   }
 };
 
-module.exports = { getMessages, getConversations, sendMessage, sendVoiceMessage, checkAccess, canChat };
+module.exports = { getMessages, getConversations, sendMessage, sendVoiceMessage, checkAccess, canChat, startDirectChat };

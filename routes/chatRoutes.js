@@ -5,7 +5,7 @@
 const express = require('express');
 const router  = express.Router();
 const multer  = require('multer');
-const { getMessages, getConversations, sendMessage, sendVoiceMessage, checkAccess } = require('../controllers/chatController');
+const { getMessages, getConversations, sendMessage, sendVoiceMessage, checkAccess, startDirectChat } = require('../controllers/chatController');
 const { protect } = require('../middleware/auth');
 
 const voiceUpload = multer({
@@ -20,6 +20,7 @@ const voiceUpload = multer({
 
 router.get('/conversations',  protect, getConversations);
 router.get('/access/:userId', protect, checkAccess);   // MOVED — must be above /:userId
+router.post('/direct/:userId', protect, startDirectChat);   // hirer opens a chat from a worker's profile
 router.get('/:userId',        protect, getMessages);
 router.post('/:userId',       protect, sendMessage);
 router.post('/:userId/voice', protect, voiceUpload.single('audio'), sendVoiceMessage);
