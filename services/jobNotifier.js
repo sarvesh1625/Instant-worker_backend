@@ -12,8 +12,7 @@ const { createNotification } = require('../controllers/notificationController');
 //   Stage 3: workers within 25 km  — 15 minutes after the job was posted
 //   Nobody beyond 25 km is ever notified.
 //
-// Who is notified: role worker, active account, SAME skill as the job (Helpers also match
-// Labour jobs), NOT currently in the middle of another job, and
+// Who is notified: role worker, active account, EXACT same skill as the job, NOT currently in the middle of another job, and
 // worker.availability === true (switched "Online"). A worker with no stored
 // location can't be placed in a radius, so they get nothing until they tap
 // Go Online in the app (that call stores their GPS point).
@@ -45,12 +44,8 @@ const SCALE = Number(process.env.NOTIFY_TIME_SCALE) > 0 ? Number(process.env.NOT
 const EARTH_RADIUS_KM = 6378.1;
 const SCHEDULER_INTERVAL_MS = 30 * 1000;
 
-// A "Helper" is a worker who does any general labour work. Helpers receive alerts for
-// Labour jobs and Helper jobs; Labour workers also receive Helper jobs.
-// (Create a skill named exactly "Helper" in Admin → Skills.)
-const HELPER = 'Helper';
-const GENERAL = ['Labour', HELPER];
-const skillsFor = (jobSkill) => (GENERAL.includes(jobSkill) ? GENERAL : [jobSkill]);
+// Exact match only: a worker is notified only when their skill (main or extra) is the SAME as the job's skill.
+const skillsFor = (jobSkill) => [jobSkill];
 
 const escapeRegex = (str) => String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 

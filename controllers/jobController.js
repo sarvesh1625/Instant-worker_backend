@@ -378,7 +378,7 @@ const applyToJob = async (req, res) => {
 
     await createNotification({
       recipient: job.postedBy._id, type: 'job_applied', title: 'New applicant!',
-      body: `${req.user.name} applied to your job: ${job.title}`, link: '/jobs/my',
+      body: `${req.user.name} applied to your job: ${job.title}`, link: `/jobs/${job._id}`,
       meta: { actorName: req.user.name, jobTitle: job.title },
     });
 
