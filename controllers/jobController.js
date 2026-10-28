@@ -47,7 +47,7 @@ const createJob = async (req, res) => {
         success: false,
         code: 'PAYMENT_PENDING',
         pending: block.pending,
-        message: 'Confirm your pending worker payment (enter the worker\'s code) before posting a new job.',
+        message: 'You have reached the limit of 4 new posts while a worker code is still not entered. Enter the worker\'s code to post more.',
       });
     }
 
