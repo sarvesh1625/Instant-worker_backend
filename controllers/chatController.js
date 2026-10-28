@@ -23,6 +23,27 @@ const notifyNewMessage = async (req, receiverId, messageId, conversationId) => {
   } catch {}
 };
 
+// Is this person connected right now (app open)? Then a message counts as delivered at once.
+const isOnline = (io, userId) => {
+  const room = io && io.sockets && io.sockets.adapter && io.sockets.adapter.rooms.get(`user_${userId}`);
+  return !!room && room.size > 0;
+};
+// deliveredAt is optional: it is stored only if the Message model has that field.
+const hasDeliveredField = () => !!(Message.schema && Message.schema.path('deliveredAt'));
+
+// The reader opened the thread: mark their unread messages read (and delivered), and tell the sender live.
+const markThreadRead = async (req, otherUserId, conversationId) => {
+  const now = new Date();
+  const r = await Message.updateMany({ conversationId, receiver: req.user._id, read: false }, { read: true });
+  if (hasDeliveredField()) {
+    await Message.updateMany({ conversationId, receiver: req.user._id, deliveredAt: null }, { deliveredAt: now });
+  }
+  const io = req.app.get('io');
+  if (io && (r.modifiedCount || r.nModified || 0) > 0) {
+    io.to(`user_${otherUserId}`).emit('messages_read', { by: String(req.user._id) });
+  }
+};
+
 const canChat = async (userId1, userId2) => {
   const a = await Job.findOne({
     postedBy: userId1,
@@ -115,7 +136,7 @@ const getMessages = async (req, res) => {
       .populate('receiver', 'name phone profilePhoto')
       .sort({ createdAt: 1 });
 
-    await Message.updateMany({ conversationId, receiver: req.user._id, read: false }, { read: true });
+    await markThreadRead(req, req.params.userId, conversationId);
     res.status(200).json({ success: true, messages });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -136,7 +157,27 @@ const sendMessage = async (req, res) => {
     await message.populate('receiver', 'name phone profilePhoto');
     notifyNewMessage(req, req.params.userId, message._id, conversationId);
 
-    res.status(201).json({ success: true, message });
+    // Push it to the other person from the server (does not depend on the sender's socket being connected).
+    const io = req.app.get('io');
+    const out = message.toObject();
+    if (isOnline(io, req.params.userId)) {
+      out.deliveredAt = new Date().toISOString();
+      if (hasDeliveredField()) Message.updateOne({ _id: message._id }, { deliveredAt: out.deliveredAt }).catch(() => {});
+    }
+    if (io) io.to(`user_${req.params.userId}`).emit('receive_message', out);
+
+    res.status(201).json({ success: true, message: out });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// PATCH /api/chat/:userId/read — the chat screen is open and a new message just arrived: mark it read right away.
+const markRead = async (req, res) => {
+  try {
+    const conversationId = Message.getConversationId(req.user._id, req.params.userId);
+    await markThreadRead(req, req.params.userId, conversationId);
+    res.status(200).json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -161,10 +202,15 @@ const sendVoiceMessage = async (req, res) => {
     await message.populate('sender', 'name phone profilePhoto');
     notifyNewMessage(req, req.params.userId, message._id, conversationId);
 
-    res.status(201).json({ success: true, message });
+    const io = req.app.get('io');
+    const out = message.toObject();
+    if (isOnline(io, req.params.userId)) out.deliveredAt = new Date().toISOString();
+    if (io) io.to(`user_${req.params.userId}`).emit('receive_message', out);
+
+    res.status(201).json({ success: true, message: out });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-module.exports = { getMessages, getConversations, sendMessage, sendVoiceMessage, checkAccess, canChat, startDirectChat };
+module.exports = { getMessages, getConversations, sendMessage, sendVoiceMessage, checkAccess, canChat, startDirectChat, markRead };

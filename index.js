@@ -69,6 +69,8 @@ app.use('/api/users',         require('./routes/userRoutes'));
 // NEW — public skill list, used by every skill dropdown across the app
 app.use('/api/skills',        require('./routes/skillRoutes'));
 app.use('/api/subscriptions', require('./routes/subscriptionRoutes'));
+// NEW — training videos (people watch them after sign-up; admin uploads them)
+app.use('/api/training',      require('./routes/trainingRoutes'));
 app.use('/api/auth/forgot-password-send-otp', otpLimiter);
 app.use('/api', require('./routes/sitemapRoute'));
 
@@ -80,6 +82,9 @@ const io = new Server(server, {
   cors: { origin: allowedOrigins, methods: ['GET', 'POST'], credentials: true },
 });
 
+// Controllers use this to push events (new message, read ticks) straight to a user's room.
+app.set('io', io);
+
 const userSockets = {};
 
 io.on('connection', (socket) => {
@@ -87,6 +92,24 @@ io.on('connection', (socket) => {
   if (userId) {
     userSockets[userId] = socket.id;
     socket.join(`user_${userId}`);
+
+    // Messages sent while this person was offline are now "delivered" (double grey tick for the sender).
+    // Only runs if the Message model has a deliveredAt field (see README).
+    try {
+      const Message = require('./models/Message');
+      if (Message.schema.path('deliveredAt')) {
+        (async () => {
+          try {
+            const pending = await Message.find({ receiver: userId, deliveredAt: null }).select('sender');
+            if (pending.length) {
+              await Message.updateMany({ receiver: userId, deliveredAt: null }, { deliveredAt: new Date() });
+              [...new Set(pending.map(m => String(m.sender)))].forEach(sid =>
+                io.to(`user_${sid}`).emit('messages_delivered', { to: String(userId) }));
+            }
+          } catch (e) { console.error('Delivery mark error:', e.message); }
+        })();
+      }
+    } catch {}
   }
 
   socket.on('send_message', ({ senderId, receiverId, message }) => {

@@ -1,0 +1,24 @@
+const express = require('express');
+const router  = express.Router();
+const multer  = require('multer');
+const { protect } = require('../middleware/auth');
+const { adminOnly } = require('../middleware/adminAuth');
+const { getStatus, markComplete, adminList, adminCreate, adminUpdate, adminDelete } = require('../controllers/trainingController');
+
+const videoUpload = multer({
+  dest: 'uploads/',
+  limits: { fileSize: 100 * 1024 * 1024 },   // 100 MB — Cloudinary's free plan limit for one video
+  fileFilter: (req, file, cb) => (/^video\//.test(file.mimetype) ? cb(null, true) : cb(new Error('Video files only'))),
+});
+
+// People (workers and hirers)
+router.get('/status',        protect, getStatus);
+router.post('/:id/complete', protect, markComplete);
+
+// Admin only — registered under /api/training/admin/...
+router.get('/admin',          protect, adminOnly, adminList);
+router.post('/admin',         protect, adminOnly, videoUpload.single('video'), adminCreate);
+router.patch('/admin/:id',    protect, adminOnly, adminUpdate);
+router.delete('/admin/:id',   protect, adminOnly, adminDelete);
+
+module.exports = router;
