@@ -64,6 +64,11 @@ const adminList = async (req, res) => {
 // POST /api/training/admin  (multipart: video file OR a `url` field; title, audience, order, requireExisting)
 const adminCreate = async (req, res) => {
   const tmp = req.file && req.file.path;
+  // Diagnostic: shows in the Render logs what the upload request actually contained.
+  console.log('[training upload]', {
+    hasFile: !!req.file, name: req.file && req.file.originalname, mime: req.file && req.file.mimetype, size: req.file && req.file.size,
+    badType: req.badVideoType || null, fields: Object.keys(req.body || {}), contentType: String(req.headers['content-type'] || '').slice(0, 40),
+  });
   try {
     const { title, audience, order, requireExisting } = req.body;
     if (!title || !title.trim()) return res.status(400).json({ success: false, message: 'Title is required' });
