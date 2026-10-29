@@ -77,11 +77,17 @@ const adminCreate = async (req, res) => {
     let url = (req.body.url || '').trim();
     let publicId = '';
     if (req.file) {
-      const result = await cloudinary.uploader.upload_large(req.file.path, {
-        resource_type: 'video', folder: 'instant-worker/training', chunk_size: 6000000,
+      // upload_large only reports back through a callback, so it is wrapped in a promise here.
+      const result = await new Promise((resolve, reject) => {
+        cloudinary.uploader.upload_large(
+          req.file.path,
+          { resource_type: 'video', folder: 'instant-worker/training', chunk_size: 6000000 },
+          (err, out) => (err ? reject(new Error(err.message || 'Cloudinary upload failed')) : resolve(out)),
+        );
       });
-      url = result.secure_url;
-      publicId = result.public_id;
+      url = result && result.secure_url;
+      publicId = (result && result.public_id) || '';
+      if (!url) throw new Error('Cloudinary did not return a video link. Check the Cloudinary keys on Render.');
     }
     if (!url && req.badVideoType) return res.status(400).json({ success: false, message: `"${req.badVideoType}" is not a video file. Use .mp4, .mov, .webm or .mkv, or paste a link.` });
     if (!url) return res.status(400).json({ success: false, message: 'Upload a video file or paste a video link' });
