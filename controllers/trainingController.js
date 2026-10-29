@@ -78,6 +78,7 @@ const adminCreate = async (req, res) => {
       url = result.secure_url;
       publicId = result.public_id;
     }
+    if (!url && req.badVideoType) return res.status(400).json({ success: false, message: `"${req.badVideoType}" is not a video file. Use .mp4, .mov, .webm or .mkv, or paste a link.` });
     if (!url) return res.status(400).json({ success: false, message: 'Upload a video file or paste a video link' });
     if (!/^https:\/\//i.test(url)) return res.status(400).json({ success: false, message: 'The video link must start with https://' });
 
