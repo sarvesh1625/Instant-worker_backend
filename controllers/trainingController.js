@@ -22,6 +22,7 @@ const requiredFor = async (user) => {
 const getStatus = async (req, res) => {
   try {
     const videos = await requiredFor(req.user);
+    console.log('[training status]', { role: req.user.role, required: videos.length });
     if (videos.length === 0) return res.status(200).json({ success: true, required: false, completed: true, videos: [] });
     const done = await TrainingProgress.find({ user: req.user._id, video: { $in: videos.map(v => v._id) } }).select('video');
     const doneSet = new Set(done.map(d => String(d.video)));
