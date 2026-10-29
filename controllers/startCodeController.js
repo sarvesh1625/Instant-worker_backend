@@ -28,8 +28,10 @@ const getMyStartCode = async (req, res) => {
       { _id: jobId, applicants: { $elemMatch: { worker: me, startOtp: { $in: [null] } } } },
       { $set: { 'applicants.$.startOtp': newCode() } }
     );
-    const job = await Job.findOne({ _id: jobId, ...waiting }).select('+applicants.startOtp title');
-    const mine = job && job.applicants.find(a => a.worker.toString() === me.toString());
+    // Do NOT add a field name (like "title") next to the "+" here: that turns it into an "only these
+    // fields" select, and each applicant then comes back without its worker id.
+    const job = await Job.findOne({ _id: jobId, ...waiting }).select('+applicants.startOtp');
+    const mine = job && job.applicants.find(a => a.worker && String(a.worker) === String(me));
     if (!mine || !mine.startOtp) return res.status(500).json({ success: false, message: 'Could not load your code' });
     res.status(200).json({ success: true, otp: mine.startOtp, title: job.title });
   } catch (error) {
@@ -44,7 +46,7 @@ const checkStartCode = async (jobId, workerId, enteredRaw) => {
     return { ok: false, status: 400, code: 'START_CODE_REQUIRED', message: 'Ask the worker for their 4-digit start code.' };
   }
   const job = await Job.findById(jobId).select('+applicants.startOtp');
-  const app = job && job.applicants.find(a => a.worker.toString() === String(workerId));
+  const app = job && job.applicants.find(a => a.worker && String(a.worker) === String(workerId));
   if (!app) return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Worker not found' };
 
   if (app.startLockedUntil && app.startLockedUntil > new Date()) {

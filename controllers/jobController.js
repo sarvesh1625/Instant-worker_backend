@@ -93,6 +93,18 @@ const createJob = async (req, res) => {
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+// A logged-in WORKER only sees jobs for their own skill(s) (main skill + extra skills), same rule the
+// notification flow uses. Returns null (= no restriction) for posters, visitors, and for a worker who has
+// not saved any skill yet (otherwise their list would be empty with no way to fix it).
+const workerSkillFilter = async (user) => {
+  if (!user || !user._id) return null;
+  const u = await User.findById(user._id).select('role worker.skill worker.skills').lean();
+  if (!u || u.role !== 'worker') return null;
+  const names = [...new Set([u.worker && u.worker.skill, ...((u.worker && u.worker.skills) || [])]
+    .filter(s => typeof s === 'string' && s.trim()).map(s => s.trim()))];
+  return names.length ? names.map(s => new RegExp(`^${escapeRegex(s)}$`, 'i')) : null;
+};
+
 
 // ── Phone numbers ─────────────────────────────────────────────────────────
 // A phone number only travels to someone who is allowed to call: the poster and an
@@ -135,7 +147,11 @@ const getJobs = async (req, res) => {
     const skip = (Number(page) - 1) * Number(limit);
 
     const baseMatch = { status: 'open', createdAt: { $gte: expiryCutoff() } };
-    if (skill && skill.trim()) baseMatch.skill = { $regex: `^${escapeRegex(skill.trim())}$`, $options: 'i' };
+    const conds = [];
+    if (skill && skill.trim()) conds.push({ skill: { $regex: `^${escapeRegex(skill.trim())}$`, $options: 'i' } });
+    const mySkills = await workerSkillFilter(req.user);
+    if (mySkills) conds.push({ skill: { $in: mySkills } });
+    if (conds.length) baseMatch.$and = conds;
     if (jobType) baseMatch.jobType = jobType;
 
     let earlyAccess = { enabled: false, delayMinutes: 0, isSubscribed: false };
@@ -227,7 +243,11 @@ const getUrgentJobs = async (req, res) => {
   try {
     const { skill, city } = req.query;
     const query = { status: 'open', jobType: 'urgent', createdAt: { $gte: expiryCutoff() } };
-    if (skill && skill.trim()) query.skill = { $regex: `^${escapeRegex(skill.trim())}$`, $options: 'i' };
+    const conds = [];
+    if (skill && skill.trim()) conds.push({ skill: { $regex: `^${escapeRegex(skill.trim())}$`, $options: 'i' } });
+    const mySkills = await workerSkillFilter(req.user);
+    if (mySkills) conds.push({ skill: { $in: mySkills } });
+    if (conds.length) query.$and = conds;
     if (city  && city.trim())  query['location.city'] = { $regex: escapeRegex(city.trim()), $options: 'i' };
 
     if (req.user) {
