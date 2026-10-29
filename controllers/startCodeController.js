@@ -5,12 +5,12 @@ const Job = require('../models/Job');
 // poster; the poster types it in to start the work. Proves the two met. Mirrors the payment code
 // used when work is completed. The poster's API never returns the code (select:false).
 //
-// Turned on with the environment variable START_CODE=on. Off (default) = old behaviour.
+// ON by default. Set the environment variable START_CODE=off to turn it off.
 
 const MAX_ATTEMPTS = 5;
 const LOCK_MINUTES = 15;
 
-const startCodeRequired = () => String(process.env.START_CODE || '').toLowerCase() === 'on';
+const startCodeRequired = () => String(process.env.START_CODE || 'on').toLowerCase() !== 'off';
 const newCode = () => String(crypto.randomInt(1000, 10000)); // 4 digits
 
 // GET /api/jobs/:id/start-code  (worker) — creates the code on first call, then returns the same one.

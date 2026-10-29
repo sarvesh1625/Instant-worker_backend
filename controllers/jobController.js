@@ -25,7 +25,8 @@ const CITY_COORDS = {
 
 // ── Subscription-gated early access — UNCHANGED from your original ─────────
 const hasActiveSubscription = async (userId) => {
-  const sub = await UserSubscription.findOne({ user: userId, status: 'active' });
+  // 'cancelled' still counts until the paid period ends
+  const sub = await UserSubscription.findOne({ user: userId, $or: [{ status: 'active' }, { status: 'cancelled', currentPeriodEnd: { $gt: new Date() } }] });
   return !!sub;
 };
 
@@ -250,6 +251,18 @@ const getJobById = async (req, res) => {
     const job = await Job.findById(req.params.id).populate('postedBy', 'name phone').populate('applicants.worker', 'name phone');
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
     const out = scrubJob(job.toObject(), req.user?._id);
+    // Poster's view: when subscriptions are ON, paid applicants are listed first and marked isPaid.
+    if (req.user && String(req.user._id) === idOf(out.postedBy) && (out.applicants || []).length) {
+      try {
+        const settings = await PlatformSettings.getSettings();
+        if (settings.subscriptionsEnabled) {
+          const subs = await UserSubscription.find({ user: { $in: out.applicants.map(a => idOf(a.worker)).filter(Boolean) }, $or: [{ status: 'active' }, { status: 'cancelled', currentPeriodEnd: { $gt: new Date() } }] }).select('user');
+          const paid = new Set(subs.map(s => String(s.user)));
+          out.applicants = out.applicants.map(a => ({ ...a, isPaid: paid.has(idOf(a.worker)) }));
+          out.applicants = [...out.applicants.filter(a => a.isPaid), ...out.applicants.filter(a => !a.isPaid)];
+        }
+      } catch {}
+    }
     res.status(200).json({ success: true, job: out });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -447,9 +460,25 @@ const updateApplicantStatus = async (req, res) => {
     await job.save();
 
     if (status === 'accepted') {
-      if (seatsTaken(job) >= job.workersNeeded && job.status === 'open') {
-        job.status = 'closed';
+      if (seatsTaken(job) >= job.workersNeeded) {
+        // Every place is filled: the others still waiting are rejected automatically.
+        const leftover = job.applicants.filter(a => a.status === 'pending' && String(a.worker._id) !== String(applicant.worker._id));
+        for (const a of leftover) {
+          a.status = 'rejected';
+          a.chatUnlocked = false;
+        }
+        if (job.status === 'open') job.status = 'closed';
         await job.save();
+        for (const a of leftover) {
+          try {
+            await createNotification({
+              recipient: a.worker._id, type: 'applicant_rejected',
+              title: 'Application not selected',
+              body: `"${job.title}" is now filled, so your application was not selected.`,
+              link: '/jobs', meta: { jobTitle: job.title },
+            });
+          } catch {}
+        }
       }
     }
 

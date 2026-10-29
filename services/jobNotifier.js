@@ -116,7 +116,7 @@ const filterByAudience = async (workers, audience, enabled) => {
   if (workers.length === 0) return [];
   const subs = await UserSubscription.find({
     user: { $in: workers.map(w => w._id) },
-    status: 'active',
+    $or: [{ status: 'active' }, { status: 'cancelled', currentPeriodEnd: { $gt: new Date() } }],
   }).select('user');
   const subscribed = new Set(subs.map(s => s.user.toString()));
   return workers.filter(w => (audience === 'premium') === subscribed.has(w._id.toString()));

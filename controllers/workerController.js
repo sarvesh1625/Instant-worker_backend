@@ -1,4 +1,6 @@
 const User = require('../models/User');
+const PlatformSettings = require('../models/PlatformSettings');
+const UserSubscription = require('../models/UserSubscription');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -11,6 +13,8 @@ const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 //    a worker with 60 reviews averaging 4.8, so the score pulls small samples
 //    toward 4.0 (as if every worker had 3 extra "neutral" reviews). Ties
 //    (e.g. several unrated workers) are broken by distance, nearest first.
+//  • When the admin has subscriptions ON: workers with an active subscription are listed FIRST, then the
+//    others — inside each group the order above still applies. Each result carries `isPaid`.
 //  • Category: when `skill` is sent, only that category is returned.
 //  • Without coordinates (user said no to location): falls back to the city /
 //    area text match, same ranking, no distance cut-off.
@@ -29,10 +33,10 @@ const WORKER_PUBLIC_FIELDS = {
   'idVerification.status': 1, createdAt: 1,
   'worker.skill': 1, 'worker.skills': 1, 'worker.experience': 1, 'worker.wagePerDay': 1,
   'worker.availability': 1, 'worker.rating': 1, 'worker.totalJobsDone': 1,
-  distanceKm: 1,
+  distanceKm: 1, isPaid: 1,
 };
 
-const buildSearchPipeline = ({ match, geo, skip, limit }) => {
+const buildSearchPipeline = ({ match, geo, skip, limit, premiumFirst }) => {
   const stages = [];
 
   if (geo) {
@@ -64,11 +68,31 @@ const buildSearchPipeline = ({ match, geo, skip, limit }) => {
     },
   });
 
-  stages.push({
-    $sort: geo
-      ? { ratingScore: -1, distanceMeters: 1, createdAt: -1 }
-      : { ratingScore: -1, 'worker.availability': -1, createdAt: -1 },
-  });
+  if (premiumFirst) {
+    stages.push({
+      $lookup: {
+        from: UserSubscription.collection.name,
+        let: { uid: '$_id' },
+        pipeline: [
+          { $match: { $expr: { $and: [
+            { $eq: ['$user', '$$uid'] },
+            { $or: [
+              { $eq: ['$status', 'active'] },
+              { $and: [{ $eq: ['$status', 'cancelled'] }, { $gt: ['$currentPeriodEnd', '$$NOW'] }] },   // cancelled but still paid up
+            ] },
+          ] } } },
+          { $limit: 1 }, { $project: { _id: 1 } },
+        ],
+        as: '_sub',
+      },
+    });
+    stages.push({ $addFields: { isPaid: { $gt: [{ $size: '$_sub' }, 0] } } });
+  }
+
+  const order = geo
+    ? { ratingScore: -1, distanceMeters: 1, createdAt: -1 }
+    : { ratingScore: -1, 'worker.availability': -1, createdAt: -1 };
+  stages.push({ $sort: premiumFirst ? { isPaid: -1, ...order } : order });
 
   stages.push({
     $facet: {
@@ -111,7 +135,10 @@ const searchWorkers = async (req, res) => {
       ];
     }
 
+    const settings = await PlatformSettings.getSettings();
+
     const pipeline = buildSearchPipeline({
+      premiumFirst: !!settings.subscriptionsEnabled,
       match,
       geo: hasGeo ? { lat: latNum, lng: lngNum } : null,
       skip: (page - 1) * limit,

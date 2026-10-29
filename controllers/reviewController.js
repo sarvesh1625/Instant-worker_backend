@@ -1,6 +1,9 @@
 const Review = require('../models/Review');
 const User   = require('../models/User');
 
+const EDIT_HOURS = 5;
+const editableUntil = (r) => new Date(new Date(r.createdAt).getTime() + EDIT_HOURS * 3600 * 1000);
+
 const ratingFieldFor = (role) => (role === 'worker' ? 'worker' : 'poster');
 
 const recalcRating = async (userId) => {
@@ -76,4 +79,45 @@ const deleteReview = async (req, res) => {
   }
 };
 
-module.exports = { addReview, getUserReviews, deleteReview };
+// PATCH /api/reviews/:reviewId  { rating, comment }  — author only, within EDIT_HOURS of posting.
+const updateReview = async (req, res) => {
+  try {
+    const review = await Review.findById(req.params.reviewId);
+    if (!review) return res.status(404).json({ success: false, message: 'Review not found' });
+    if (review.reviewedBy.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+    if (Date.now() > editableUntil(review).getTime()) {
+      return res.status(403).json({ success: false, code: 'EDIT_EXPIRED', message: `You can only change a rating within ${EDIT_HOURS} hours of giving it.` });
+    }
+    const { rating, comment } = req.body;
+    if (rating !== undefined) {
+      if (!(Number(rating) >= 1 && Number(rating) <= 5)) return res.status(400).json({ success: false, message: 'Rating must be between 1 and 5' });
+      review.rating = Number(rating);
+    }
+    if (comment !== undefined) review.comment = String(comment).slice(0, 400);
+    await review.save();
+    await recalcRating(review.reviewedUser);
+    await review.populate('reviewedUser', 'name profilePhoto role');
+    await review.populate('job', 'title');
+    res.status(200).json({ success: true, review: { ...review.toObject(), editableUntil: editableUntil(review) } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /api/reviews/by/me  — ratings I have given, newest first, with the time left to edit.
+const getMyGivenReviews = async (req, res) => {
+  try {
+    const reviews = await Review.find({ reviewedBy: req.user._id })
+      .populate('reviewedUser', 'name profilePhoto role').populate('job', 'title').sort({ createdAt: -1 }).limit(100);
+    res.status(200).json({
+      success: true,
+      reviews: reviews.map(r => ({ ...r.toObject(), editableUntil: editableUntil(r) })),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+module.exports = { addReview, getUserReviews, deleteReview, updateReview, getMyGivenReviews };

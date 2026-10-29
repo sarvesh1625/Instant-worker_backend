@@ -83,6 +83,7 @@ const createCheckout = async (req, res) => {
       success: true,
       razorpaySubscriptionId: razorpaySub.id,
       razorpayKeyId: process.env.RAZORPAY_KEY_ID,
+      shortUrl: razorpaySub.short_url || null,   // hosted payment page — used by the phone app
       plan: { name: plan.name, price: plan.price, intervalMonths: plan.intervalMonths },
     });
   } catch (err) {
@@ -155,6 +156,31 @@ const verifyPayment = async (req, res) => {
   }
 };
 
+// POST /api/subscriptions/sync
+// Used by the phone app after the worker comes back from Razorpay's payment page. Asks Razorpay directly
+// whether the latest checkout has been paid, and activates it if so (no webhook needed for the first payment).
+const syncMySubscription = async (req, res) => {
+  try {
+    const sub = await UserSubscription.findOne({ user: req.user._id, status: { $in: ['pending', 'active'] } }).sort({ createdAt: -1 });
+    if (!sub || String(sub.razorpaySubscriptionId).startsWith('admin_grant_')) {
+      return res.status(200).json({ success: true, status: sub ? sub.status : 'none' });
+    }
+    if (sub.status === 'active') return res.status(200).json({ success: true, status: 'active' });
+
+    const rp = await razorpay.subscriptions.fetch(sub.razorpaySubscriptionId);
+    if (rp.status === 'active' || rp.status === 'completed') {
+      if (rp.current_start) sub.currentPeriodStart = new Date(rp.current_start * 1000);
+      if (rp.current_end)   sub.currentPeriodEnd   = new Date(rp.current_end * 1000);
+      sub.status = 'active';
+      await sub.save();
+    }
+    res.status(200).json({ success: true, status: sub.status });
+  } catch (err) {
+    console.error('Subscription sync error:', err?.error?.description || err.message);
+    res.status(500).json({ success: false, message: err?.error?.description || err.message });
+  }
+};
+
 const handleWebhook = async (req, res) => {
   try {
     const signature = req.headers['x-razorpay-signature'];
@@ -221,4 +247,4 @@ const cancelMySubscription = async (req, res) => {
   }
 };
 
-module.exports = { getPublicStatus, getPlans, getMySubscription, createCheckout, verifyPayment, handleWebhook, cancelMySubscription };
+module.exports = { getPublicStatus, getPlans, getMySubscription, createCheckout, verifyPayment, handleWebhook, cancelMySubscription, syncMySubscription };

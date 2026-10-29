@@ -1,7 +1,7 @@
 const express = require('express');
 const router  = express.Router();
 const {
-  getPublicStatus, getPlans, getMySubscription, createCheckout, verifyPayment, handleWebhook, cancelMySubscription,
+  getPublicStatus, getPlans, getMySubscription, createCheckout, verifyPayment, handleWebhook, cancelMySubscription, syncMySubscription,
 } = require('../controllers/subscriptionController');
 const { protect } = require('../middleware/auth');
 
@@ -13,5 +13,6 @@ router.get('/my',       protect, getMySubscription);
 router.post('/checkout',protect, createCheckout);
 router.post('/verify',  protect, verifyPayment); // NEW — instant activation on checkout success
 router.post('/cancel',  protect, cancelMySubscription);
+router.post('/sync',    protect, syncMySubscription);
 
 module.exports = router;

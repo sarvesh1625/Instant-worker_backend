@@ -159,6 +159,7 @@ const adminCancelSubscription = async (req, res) => {
 
     sub.status = 'cancelled';
     sub.cancelledAt = new Date();
+    if (!isRealPayment) sub.currentPeriodEnd = new Date();   // a free grant is revoked immediately
     await sub.save();
 
     res.status(200).json({
