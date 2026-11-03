@@ -8,6 +8,7 @@ router.use(protect, adminOnly);
 
 router.get('/overview', c.overview);
 router.get('/workers', c.listWorkers);
+router.get('/users/:id/full', c.userFull);
 router.get('/jobs/:id', c.jobDetail);
 router.post('/jobs/:id/close', c.closeJob);
 router.post('/payments/:jobId/:workerId/confirm', c.confirmPayment);

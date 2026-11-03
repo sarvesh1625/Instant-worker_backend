@@ -10,6 +10,18 @@ const TrainingVideo = require('../models/TrainingVideo');
 const TrainingProgress = require('../models/TrainingProgress');
 const { adminResolvePayment } = require('./paymentController');
 
+// Optional models: if one is not in this project yet, that section is simply empty instead of crashing.
+const opt = (p) => { try { return require(p); } catch { return null; } };
+const Transaction = opt('../models/Transaction');
+const Review = opt('../models/Review');
+const Portfolio = opt('../models/Portfolio');
+const Block = opt('../models/Block');
+const Message = opt('../models/Message');
+const PushToken = opt('../models/PushToken');
+const Consent = opt('../models/Consent');
+const UserSubscription = opt('../models/UserSubscription');
+opt('../models/SubscriptionPlan');
+
 const DAY = 24 * 60 * 60 * 1000;
 const esc = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const fail = (res, e) => res.status(500).json({ success: false, message: e.message });
@@ -50,6 +62,7 @@ const overview = async (req, res) => {
       jobsOpen, jobsProgress, jobsStale, jobsToday,
       loginsToday, failedToday, forgotToday, registeredToday,
       onlineByCity, onlineBySkill, signups,
+      wSkill, wLoc, wVerified, onlineWorkers,
     ] = await Promise.all([
       User.countDocuments({ role: 'worker' }),
       User.countDocuments({ role: 'user' }),
@@ -75,6 +88,11 @@ const overview = async (req, res) => {
         { $match: { role: { $ne: 'admin' }, createdAt: { $gte: since(14) } } },
         { $group: { _id: { d: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: 'Asia/Kolkata' } }, r: '$role' }, n: { $sum: 1 } } },
       ]),
+      User.countDocuments({ role: 'worker', $or: [{ 'worker.skill': { $ne: '' } }, { 'worker.skills.0': { $exists: true } }] }),
+      User.countDocuments({ role: 'worker', 'worker.location.coordinates.0': { $exists: true } }),
+      User.countDocuments({ role: 'worker', isVerified: true }),
+      User.find(onlineQ).sort({ 'worker.locationUpdatedAt': -1 }).limit(8)
+        .select('name phone city area worker.skills worker.skill worker.locationUpdatedAt worker.rating').lean(),
     ]);
 
     const byDay = {};
@@ -100,6 +118,7 @@ const overview = async (req, res) => {
       success: true,
       attention: { payments24, paymentsAll, deletionsPending, verifPending, reportsOpen, jobsStale },
       users: { totalWorkers, totalPosters, onlineNow, newToday, new7 },
+      workers: { total: totalWorkers, online: onlineNow, offline: Math.max(0, totalWorkers - onlineNow), withSkill: wSkill, withLocation: wLoc, verified: wVerified, recentOnline: onlineWorkers },
       jobs: { open: jobsOpen, inProgress: jobsProgress, postedToday: jobsToday, stale: jobsStale },
       auth: { loginsToday, failedToday, forgotToday, registeredToday },
       onlineByCity: onlineByCity.map(x => ({ city: x._id || 'Unknown', n: x.n })),
@@ -317,7 +336,78 @@ const trainingProgress = async (req, res) => {
   } catch (e) { fail(res, e); }
 };
 
+// ── Full user profile (everything we know about one person) ───────────────────
+const userFull = async (req, res) => {
+  try {
+    if (!isId(req.params.id)) return res.status(400).json({ success: false, message: 'Bad id' });
+    const user = await User.findById(req.params.id).select('-password -otp').lean();
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    const uid = user._id;
+    const none = Promise.resolve(null);
+    const [
+      stats, events, pushes, consents, deletion, jobsPosted, jobsPostedCount, jobsApplied, jobsAppliedCount,
+      txs, txTotals, sub, reviewsIn, reviewsOutCount, reportsAgainst, reportsBy, portfolioCount, blocksOut, blocksIn,
+      convoIds, actions, vids, doneVids,
+    ] = await Promise.all([
+      UserStats.findOne({ user: uid }).lean(),
+      AuthEvent.find({ $or: [{ user: uid }, { phone: String(user.phone).slice(-10) }] }).sort({ createdAt: -1 }).limit(20).lean(),
+      PushToken ? PushToken.find({ user: uid }).select('platform lang updatedAt').lean() : none,
+      Consent ? Consent.find({ user: uid }).sort({ acceptedAt: -1 }).lean() : none,
+      DeletionRequest.findOne({ user: uid }).lean(),
+      Job.find({ postedBy: uid }).sort({ createdAt: -1 }).limit(20).select('title skill status wage workersNeeded createdAt location.city location.area applicants.status applicants.paymentStatus').lean(),
+      Job.countDocuments({ postedBy: uid }),
+      Job.find({ 'applicants.worker': uid }).sort({ createdAt: -1 }).limit(20).select('title skill status wage createdAt postedBy applicants').populate('postedBy', 'name phone').lean(),
+      Job.countDocuments({ 'applicants.worker': uid }),
+      Transaction ? Transaction.find({ user: uid }).sort({ createdAt: -1 }).limit(30).populate('counterparty', 'name').populate('job', 'title').lean() : none,
+      Transaction ? Transaction.aggregate([{ $match: { user: uid } }, { $group: { _id: '$type', total: { $sum: '$amount' }, n: { $sum: 1 } } }]) : none,
+      UserSubscription ? UserSubscription.findOne({ user: uid }).sort({ createdAt: -1 }).populate('plan', 'name price').lean() : none,
+      Review ? Review.find({ reviewedUser: uid }).sort({ createdAt: -1 }).limit(10).populate('reviewedBy', 'name').lean() : none,
+      Review ? Review.countDocuments({ reviewedBy: uid }) : none,
+      Report.find({ reportedUser: uid }).sort({ createdAt: -1 }).limit(10).populate('reportedBy', 'name phone').lean(),
+      Report.find({ reportedBy: uid }).sort({ createdAt: -1 }).limit(10).populate('reportedUser', 'name phone').lean(),
+      Portfolio ? Portfolio.countDocuments({ worker: uid }) : none,
+      Block ? Block.countDocuments({ blocker: uid }) : none,
+      Block ? Block.countDocuments({ blocked: uid }) : none,
+      Message ? Message.distinct('conversationId', { $or: [{ sender: uid }, { receiver: uid }] }) : none,
+      AdminAction.find({ targetType: 'user', targetId: String(uid) }).sort({ createdAt: -1 }).limit(15).populate('admin', 'name').lean(),
+      TrainingVideo.find({ audience: user.role, active: true }).select('title').lean(),
+      TrainingProgress.find({ user: uid }).select('video completedAt').lean(),
+    ]);
+
+    // How each applied job went for THIS person
+    const applied = (jobsApplied || []).map(j => {
+      const a = (j.applicants || []).find(x => String(x.worker) === String(uid)) || {};
+      return { _id: j._id, title: j.title, skill: j.skill, status: j.status, wage: j.wage, createdAt: j.createdAt, poster: j.postedBy,
+        applicationStatus: a.status, workStatus: a.workStatus, paymentStatus: a.paymentStatus, appliedAt: a.appliedAt, crewSize: a.crewSize || 1 };
+    });
+    const posted = (jobsPosted || []).map(j => ({
+      _id: j._id, title: j.title, skill: j.skill, status: j.status, wage: j.wage, workersNeeded: j.workersNeeded, createdAt: j.createdAt,
+      city: j.location && j.location.city, area: j.location && j.location.area,
+      applicants: (j.applicants || []).length, accepted: (j.applicants || []).filter(a => a.status === 'accepted').length,
+      paymentPending: (j.applicants || []).filter(a => a.paymentStatus === 'pending').length,
+    }));
+    const doneSet = new Map((doneVids || []).map(d => [String(d.video), d.completedAt]));
+    const tot = {}; (txTotals || []).forEach(t => { tot[t._id] = { total: t.total, n: t.n }; });
+
+    log(req, 'user_view', { targetType: 'user', targetId: uid, summary: `Opened full profile of ${user.name} (${user.phone})` });
+
+    res.json({
+      success: true, user,
+      account: {
+        stats: stats || {}, events, devices: pushes || [], consents: consents || [], deletion,
+        conversations: convoIds ? convoIds.length : 0, blocksOut, blocksIn,
+      },
+      work: { posted, postedCount: jobsPostedCount, applied, appliedCount: jobsAppliedCount, portfolioCount },
+      money: { transactions: txs || [], credit: tot.credit || { total: 0, n: 0 }, debit: tot.debit || { total: 0, n: 0 }, subscription: sub },
+      trust: { reviewsIn: reviewsIn || [], reviewsGiven: reviewsOutCount, reportsAgainst, reportsBy },
+      training: (vids || []).map(v => ({ id: v._id, title: v.title, done: doneSet.has(String(v._id)), at: doneSet.get(String(v._id)) || null })),
+      adminActions: actions,
+    });
+  } catch (e) { fail(res, e); }
+};
+
 module.exports = {
+  userFull,
   logChatAccess, overview, listWorkers, jobDetail, closeJob, confirmPayment,
   listActions, listDeletions, reviewDeletion, lookup, unlockAccount, clearCodeLocks, activity, trainingProgress,
 };
