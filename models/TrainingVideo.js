@@ -11,6 +11,8 @@ const TrainingVideoSchema = new mongoose.Schema({
   active:    { type: Boolean, default: true },      // switch off to stop requiring it (and hide it)
   // false (default): required only for people who sign up after the video was uploaded.
   // true: everyone who has not watched it yet must watch it, including existing users.
+  // true (default): the person may skip it. false: it must be watched to the end (no Skip button).
+  skippable: { type: Boolean, default: true },
   requireExisting: { type: Boolean, default: false },
 }, { timestamps: true });
 

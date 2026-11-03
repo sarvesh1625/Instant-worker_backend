@@ -26,7 +26,7 @@ const getStatus = async (req, res) => {
     if (videos.length === 0) return res.status(200).json({ success: true, required: false, completed: true, videos: [] });
     const done = await TrainingProgress.find({ user: req.user._id, video: { $in: videos.map(v => v._id) } }).select('video');
     const doneSet = new Set(done.map(d => String(d.video)));
-    const list = videos.map(v => ({ _id: v._id, title: v.title, url: v.url, done: doneSet.has(String(v._id)) }));
+    const list = videos.map(v => ({ _id: v._id, title: v.title, url: v.url, skippable: v.skippable !== false, done: doneSet.has(String(v._id)) }));
     res.status(200).json({ success: true, required: true, completed: list.every(v => v.done), videos: list });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -71,7 +71,7 @@ const adminCreate = async (req, res) => {
     badType: req.badVideoType || null, fields: Object.keys(req.body || {}), contentType: String(req.headers['content-type'] || '').slice(0, 40),
   });
   try {
-    const { title, audience, order, requireExisting } = req.body;
+    const { title, audience, order, requireExisting, skippable } = req.body;
     if (!title || !title.trim()) return res.status(400).json({ success: false, message: 'Title is required' });
     if (!['worker', 'user'].includes(audience)) return res.status(400).json({ success: false, message: 'Choose who this video is for' });
 
@@ -98,6 +98,7 @@ const adminCreate = async (req, res) => {
       title: title.trim(), audience, url, publicId,
       order: Number(order) || 0,
       requireExisting: String(requireExisting) === 'true',
+      skippable: String(skippable) !== 'false',
     });
     res.status(201).json({ success: true, video });
   } catch (error) {
@@ -110,7 +111,7 @@ const adminCreate = async (req, res) => {
 const adminUpdate = async (req, res) => {
   try {
     const patch = {};
-    ['title', 'audience', 'order', 'active', 'requireExisting'].forEach(k => { if (req.body[k] !== undefined) patch[k] = req.body[k]; });
+    ['title', 'audience', 'order', 'active', 'requireExisting', 'skippable'].forEach(k => { if (req.body[k] !== undefined) patch[k] = req.body[k]; });
     if (patch.audience && !['worker', 'user'].includes(patch.audience)) return res.status(400).json({ success: false, message: 'Bad audience' });
     const video = await TrainingVideo.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true });
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
