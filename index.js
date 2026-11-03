@@ -73,6 +73,7 @@ app.use('/api/subscriptions', require('./routes/subscriptionRoutes'));
 app.use('/api/training',      require('./routes/trainingRoutes'));
 app.use('/api/auth/forgot-password-send-otp', otpLimiter);
 app.use('/api', require('./routes/sitemapRoute'));
+app.use('/api/legal', require('./routes/legalRoutes'));
 
 
 app.get('/', (req, res) => res.json({ message: 'Instant Worker API' }));
