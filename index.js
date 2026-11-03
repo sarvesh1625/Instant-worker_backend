@@ -49,6 +49,8 @@ app.use('/api/auth/verify-otp', otpLimiter);
 app.use('/api/auth/register-send-otp', otpLimiter);
 app.use('/api/reports', reportLimiter);
 
+// NEW — records logins / forgot-password for the admin Activity page (never changes the response)
+app.use('/api/auth',          require('./middleware/authActivity'));
 app.use('/api/auth',          require('./routes/authRoutes'));
 app.use('/api/workers',       require('./routes/workerRoutes'));
 app.use('/api/jobs',          require('./routes/jobRoutes'));
@@ -59,6 +61,10 @@ app.use('/api/portfolio',     require('./routes/portfolioRoutes'));
 app.use('/api/verification',  require('./routes/verificationRoutes'));
 app.use('/api/reports',       require('./routes/reportRoutes'));
 app.use('/api/blocks',        require('./routes/blockRoutes'));
+// NEW — admin ops (dashboard, workers, job detail, support, activity, action log)
+const { logChatAccess } = require('./controllers/adminOpsController');
+app.use('/api/admin',         logChatAccess);
+app.use('/api/admin/ops',     require('./routes/adminOpsRoutes'));
 app.use('/api/admin',         require('./routes/adminRoutes'));
 app.use('/api/profile',       require('./routes/profileRoutes'));
 app.use('/api/tts',           require('./routes/ttsRoutes'));
