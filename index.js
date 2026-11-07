@@ -53,6 +53,7 @@ app.use('/api/reports', reportLimiter);
 app.use('/api/auth',          require('./middleware/authActivity'));
 app.use('/api/auth',          require('./routes/authRoutes'));
 app.use('/api/workers',       require('./routes/workerRoutes'));
+app.use('/api/jobs',          require('./middleware/cancelGuard'));   // pause after repeated late cancels
 app.use('/api/jobs',          require('./routes/jobRoutes'));
 app.use('/api/reviews',       require('./routes/reviewRoutes'));
 app.use('/api/chat',          require('./routes/chatRoutes'));
@@ -82,6 +83,7 @@ app.use('/api', require('./routes/sitemapRoute'));
 app.use('/api/legal', require('./routes/legalRoutes'));
 // NEW — how many workers are online near a job (shown while posting)
 app.use('/api/nearby', require('./routes/nearbyRoutes'));
+app.use('/api/travel', require('./routes/travelRoutes'));
 
 
 app.get('/', (req, res) => res.json({ message: 'Instant Worker API' }));

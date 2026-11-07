@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const c = require('../controllers/adminOpsController');
+const x = require('../controllers/adminCancelReviewController');
 const { protect } = require('../middleware/auth');
 const { adminOnly } = require('../middleware/adminAuth');
 
@@ -20,5 +21,9 @@ router.post('/support/:userId/unlock', c.unlockAccount);
 router.post('/support/:userId/clear-code-locks', c.clearCodeLocks);
 router.get('/activity', c.activity);
 router.get('/training', c.trainingProgress);
+router.get('/cancellations', x.listCancellations);
+router.patch('/cancellations/:id/waive', x.waiveCancellation);
+router.get('/reviews', x.listReviews);
+router.patch('/reviews/:id', x.editReview);
 
 module.exports = router;
