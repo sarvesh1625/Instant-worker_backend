@@ -22,7 +22,7 @@ const requiredFor = async (user) => {
 const getStatus = async (req, res) => {
   try {
     const videos = await requiredFor(req.user);
-    console.log('[training status]', { role: req.user.role, required: videos.length });
+    console.log('[training status]', { role: req.user.role, required: videos.length, mustWatch: videos.filter(v => v.skippable === false).length });
     if (videos.length === 0) return res.status(200).json({ success: true, required: false, completed: true, videos: [] });
     const done = await TrainingProgress.find({ user: req.user._id, video: { $in: videos.map(v => v._id) } }).select('video');
     const doneSet = new Set(done.map(d => String(d.video)));
@@ -39,6 +39,11 @@ const markComplete = async (req, res) => {
     const required = await requiredFor(req.user);
     const video = required.find(v => String(v._id) === req.params.id);
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
+    // A "must watch" video only counts when the app says it was played to the end (a skip is refused).
+    // Note: this trusts the app; it stops accidental skips, not someone calling the API by hand.
+    if (video.skippable === false && !(req.body && (req.body.watched === true || req.body.watched === 'true'))) {
+      return res.status(400).json({ success: false, message: 'This video must be watched to the end.' });
+    }
     await TrainingProgress.updateOne(
       { user: req.user._id, video: video._id },
       { $setOnInsert: { user: req.user._id, video: video._id, completedAt: new Date() } },
