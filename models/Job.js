@@ -1,5 +1,12 @@
 const mongoose = require('mongoose');
 
+// A person the team leader brings. Typed in by the leader; has no account.
+const TeamMemberSchema = new mongoose.Schema({
+  name:  { type: String, required: true, maxlength: 40 },
+  phone: { type: String, default: '', maxlength: 10 },
+  skill: { type: String, default: '', maxlength: 30 },
+}, { _id: false });
+
 const JobSchema = new mongoose.Schema({
   postedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   title:    { type: String, required: true },
@@ -73,6 +80,10 @@ const JobSchema = new mongoose.Schema({
     // Team leader ("mestri"): how many workers this applicant brings, INCLUDING themselves.
     // 1 = an ordinary single worker. One team uses crewSize of the job's workersNeeded seats.
     crewSize: { type: Number, default: 1, min: 1 },
+    // The other people in the team (crewSize - 1 at most), typed in by the leader.
+    // Old applications have none. membersConsent = leader confirmed they may share these details.
+    members:        { type: [TeamMemberSchema], default: [] },
+    membersConsent: { type: Boolean, default: false },
 
     chatUnlocked: { type: Boolean, default: false },
     autoAccepted: { type: Boolean, default: false },

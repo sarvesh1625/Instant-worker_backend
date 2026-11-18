@@ -114,6 +114,24 @@ const workerSkillFilter = async (user) => {
 const idOf = (x) => String((x && x._id) || x);
 const contactOpen = (a) => !!(a && a.chatUnlocked && !a.contactClosed);
 
+// Team members typed in by a team leader: plain capped text, phone optional (10-digit Indian mobile).
+const cleanText = (s, max) => String(s == null ? '' : s).replace(/[\u0000-\u001F\u007F<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+const cleanMembers = (raw, crewSize) => {
+  if (raw === undefined || raw === null || raw === '') return { members: [] };
+  if (!Array.isArray(raw)) return { error: 'Invalid team members.' };
+  if (raw.length > Math.max(0, crewSize - 1)) return { error: `A team of ${crewSize} can list at most ${Math.max(0, crewSize - 1)} other members.` };
+  const members = [];
+  for (const m of raw) {
+    const name = cleanText(m && m.name, 40);
+    if (!name) return { error: 'Each team member needs a name.' };
+    let phone = String((m && m.phone) || '').replace(/\D/g, '');
+    if (phone.length === 12 && phone.startsWith('91')) phone = phone.slice(2);
+    if (phone && !/^[6-9]\d{9}$/.test(phone)) return { error: `The phone number for ${name} is not valid.` };
+    members.push({ name, phone, skill: cleanText(m && m.skill, 30) });
+  }
+  return { members };
+};
+
 const scrubJob = (o, viewerId) => {
   const me = viewerId ? String(viewerId) : null;
   const iAmPoster = !!me && me === idOf(o.postedBy);
@@ -122,9 +140,14 @@ const scrubJob = (o, viewerId) => {
     o.postedBy = { ...o.postedBy, phone: undefined };
   }
   o.applicants = (o.applicants || []).map(a => {
+    const isMe = !!me && idOf(a.worker) === me;
     if (a.worker && a.worker.phone !== undefined) {
-      const isMe = !!me && idOf(a.worker) === me;
       if (!isMe && !(iAmPoster && contactOpen(a))) a.worker = { ...a.worker, phone: undefined };
+    }
+    // Team members: only the poster and the leader see them; their phones follow the same rule as the leader's.
+    if (Array.isArray(a.members) && a.members.length) {
+      if (!isMe && !iAmPoster) a.members = [];
+      else if (!isMe && !contactOpen(a)) a.members = a.members.map(m => ({ name: m.name, skill: m.skill }));
     }
     return a;
   });
@@ -380,6 +403,15 @@ const applyToJob = async (req, res) => {
     }
     const teamText = crewSize > 1 ? ` (team of ${crewSize})` : '';
 
+    // Other team members typed in by the leader (optional, so older app versions keep working).
+    const cm = cleanMembers(req.body && req.body.members, crewSize);
+    if (cm.error) return res.status(400).json({ success: false, message: cm.error });
+    const members = cm.members;
+    const membersConsent = members.length > 0;
+    if (members.length && !(req.body.consent === true || req.body.consent === 'true')) {
+      return res.status(400).json({ success: false, message: 'Please confirm you have their permission to share these details.' });
+    }
+
     if (job.jobType === 'urgent' || job.autoAccept) {
       // Atomic "claim a seat": the check (seats left, not already applied, job open) and the
       // insert happen in ONE database operation, so 15 workers tapping Apply at the same
@@ -402,7 +434,7 @@ const applyToJob = async (req, res) => {
         },
         { $push: { applicants: {
             worker: req.user._id, status: 'accepted', workStatus: 'not_started',
-            chatUnlocked: true, autoAccepted: true, appliedAt: new Date(), crewSize,
+            chatUnlocked: true, autoAccepted: true, appliedAt: new Date(), crewSize, members, membersConsent,
         } } },
         { new: true }
       );
@@ -429,7 +461,7 @@ const applyToJob = async (req, res) => {
       return res.status(200).json({ success: true, message: "You're confirmed! Chat is now open.", autoAccepted: true });
     }
 
-    job.applicants.push({ worker: req.user._id, crewSize });
+    job.applicants.push({ worker: req.user._id, crewSize, members, membersConsent });
     await job.save();
 
     await createNotification({

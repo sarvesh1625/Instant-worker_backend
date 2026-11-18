@@ -30,8 +30,8 @@ const userSchema = new mongoose.Schema({
 
   idVerification: {
     status: { type: String, enum: ['not_submitted', 'pending', 'approved', 'rejected'], default: 'not_submitted' },
-    idType:          { type: String, enum: ['aadhaar', 'voter', 'pan', 'driving', ''], default: '' },
-    idNumber:        { type: String, default: '' },
+    idType:          { type: String, enum: ['voter', 'pan', 'driving', 'eshram', 'aadhaar', ''], default: '' },
+    idNumber:        { type: String, default: '' },   // no longer collected (kept empty); old records may still hold the last 4 digits
     documentPhoto:   { type: String, default: '' },
     selfiePhoto:     { type: String, default: '' },
     submittedAt:     { type: Date },
