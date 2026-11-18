@@ -1,5 +1,14 @@
 const mongoose = require('mongoose');
 
+// One row of the wage guide: the usual daily pay range for a skill, optionally for one city.
+// city '' = applies to every city that has no row of its own.
+const WageGuideRowSchema = new mongoose.Schema({
+  skill: { type: String, required: true, trim: true, maxlength: 40 },
+  city:  { type: String, default: '', trim: true, maxlength: 40 },
+  min:   { type: Number, required: true, min: 1 },
+  max:   { type: Number, required: true, min: 1 },
+}, { _id: false });
+
 // Singleton pattern — this collection should only ever hold ONE document.
 // getSettings() below always fetches-or-creates that single document rather
 // than letting multiple settings docs accidentally exist. Start simple with
@@ -11,6 +20,8 @@ const platformSettingsSchema = new mongoose.Schema({
   // Master switch for the payment-OTP rule (poster must enter the worker's OTP
   // before posting again; contact closes after). OFF = old behaviour.
   paymentOtpEnabled:    { type: Boolean, default: true },
+  // Usual daily pay per skill (and city). Only a hint shown to posters — never blocks a job.
+  wageGuide:            { type: [WageGuideRowSchema], default: [] },
   enabledAt:            { type: Date },
   enabledBy:             { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });

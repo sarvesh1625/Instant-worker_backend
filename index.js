@@ -85,6 +85,8 @@ app.use('/api/legal', require('./routes/legalRoutes'));
 app.use('/api/nearby', require('./routes/nearbyRoutes'));
 app.use('/api/travel', require('./routes/travelRoutes'));
 
+app.use('/api/wage-guide', require('./routes/wageGuideRoutes'));
+
 
 app.get('/', (req, res) => res.json({ message: 'Instant Worker API' }));
 

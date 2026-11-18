@@ -1,7 +1,7 @@
 const User = require('../models/User');
+const Otp  = require('../models/Otp');
 const jwt = require('jsonwebtoken');
-const axios = require('axios');
-const { sendOtp, verifyOtp, normalizePhone, otpLength } = require('../services/otpService');
+const axios = require('axios'); // NEW dependency — run `npm install axios` in /server
 
 // Generate JWT token
 const generateToken = (id) => {
@@ -10,191 +10,193 @@ const generateToken = (id) => {
   });
 };
 
-// Only these two roles can be created through sign-up. (Before this, whatever "role" the request
-// carried was saved as-is, so anyone could have registered themselves as an admin.)
-const ALLOWED_ROLES = ['worker', 'user'];
+// ── OTP delivery (LEGACY custom-OTP flow) ────────────────────────────────────
+// Superseded by the MSG91 widget flow below (verifyWidgetTokenAndRegister),
+// but left in place since Otp.js and the /verify-otp re-verification route
+// for EXISTING users still use it. Safe to keep both systems running.
+const isTestMode = () => process.env.OTP_MODE !== 'production';
 
-// Skills a worker picked: a list of short plain-text names (built-in ones and any typed under "Other").
-const cleanSkills = (input) => {
-  const arr = Array.isArray(input) ? input : (typeof input === 'string' && input ? [input] : []);
-  const out = [], seen = new Set();
-  for (const raw of arr) {
-    if (typeof raw !== 'string') continue;
-    const s = raw.replace(/[\u0000-\u001f<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40);
-    const k = s.toLowerCase();
-    if (!s || seen.has(k)) continue;
-    seen.add(k); out.push(s);
-    if (out.length >= 8) break;
-  }
-  return out;
-};
-// worker.skill = the first pick (main skill, used by job matching today); worker.skills = all picks.
-const workerFields = (role, body) => {
-  if (role !== 'worker') return {};
-  const skills = cleanSkills(Array.isArray(body.skills) && body.skills.length ? body.skills : body.skill);
-  return skills.length ? { worker: { skill: skills[0], skills } } : {};
-};
-
-const sendFailure = (res, err) =>
-  res.status(err.status || 500).json({ success: false, message: err.status ? err.message : 'Could not send OTP' });
-
-// ── Registration OTP (real SMS via MSG91) ────────────────────────────────────
 const sendRegisterOtp = async (req, res) => {
   try {
-    const phone = normalizePhone(req.body.phone);
-    if (!phone) {
+    const { phone } = req.body;
+
+    if (!phone || !/^\d{10}$/.test(phone.trim())) {
       return res.status(400).json({ success: false, message: 'Enter a valid 10-digit mobile number' });
     }
-    if (await User.findOne({ phone })) {
+
+    const existing = await User.findOne({ phone: phone.trim() });
+    if (existing) {
       return res.status(400).json({ success: false, message: 'This number is already registered. Please login instead.' });
     }
 
-    const r = await sendOtp(phone, 'reg');
-    if (!r.sent) {
-      return res.status(429).json({
-        success: false,
-        message: r.reason === 'cooldown' ? 'Please wait 30 seconds before requesting another OTP.'
-                                         : 'Too many OTP requests for this number. Try again in an hour.',
-      });
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await Otp.findOneAndUpdate(
+      { phone: phone.trim() },
+      { phone: phone.trim(), code, attempts: 0, expiresAt },
+      { upsert: true, new: true }
+    );
+
+    if (isTestMode()) {
+      console.log(`[TEST MODE] Registration OTP for ${phone}: ${code}`);
+      return res.status(200).json({ success: true, message: 'OTP sent (test mode)', otp_dev: code });
     }
-    res.status(200).json({ success: true, message: 'OTP sent to your mobile number', otpLength: otpLength(), ...(r.devCode && { otp_dev: r.devCode }) });
+
+    res.status(200).json({ success: true, message: 'OTP sent to your mobile number' });
   } catch (error) {
-    sendFailure(res, error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
 const register = async (req, res) => {
   try {
-    const { name, email, password, role, otp } = req.body;
-    if (!ALLOWED_ROLES.includes(role)) return res.status(400).json({ success: false, message: 'Choose whether you want work or want to hire' });
-    const phone = normalizePhone(req.body.phone);
-    if (!phone) return res.status(400).json({ success: false, message: 'Enter a valid 10-digit mobile number' });
-    if (!otp)   return res.status(400).json({ success: false, message: 'OTP is required' });
+    const { name, phone, email, password, role, otp } = req.body;
 
-    if (await User.findOne({ phone })) {
+    if (!otp) {
+      return res.status(400).json({ success: false, message: 'OTP is required' });
+    }
+
+    const existing = await User.findOne({ phone });
+    if (existing) {
       return res.status(400).json({ success: false, message: 'Phone already registered' });
     }
 
-    const v = await verifyOtp(phone, 'reg', otp);
-    if (!v.ok) return res.status(400).json({ success: false, message: v.message });
+    const otpDoc = await Otp.findOne({ phone: phone?.trim() });
 
-    const user = await User.create({ name, phone, email, password, role, isVerified: true, ...workerFields(role, req.body) });
+    if (!otpDoc) {
+      return res.status(400).json({ success: false, message: 'No OTP found. Please request a new one.' });
+    }
+    if (otpDoc.expiresAt < Date.now()) {
+      await Otp.deleteOne({ _id: otpDoc._id });
+      return res.status(400).json({ success: false, message: 'OTP expired. Please request a new one.' });
+    }
+    if (otpDoc.attempts >= 5) {
+      await Otp.deleteOne({ _id: otpDoc._id });
+      return res.status(400).json({ success: false, message: 'Too many wrong attempts. Please request a new OTP.' });
+    }
+    if (otpDoc.code !== otp.trim()) {
+      otpDoc.attempts += 1;
+      await otpDoc.save();
+      const left = 5 - otpDoc.attempts;
+      return res.status(400).json({
+        success: false,
+        message: `Wrong OTP. ${left} attempt${left !== 1 ? 's' : ''} remaining.`,
+      });
+    }
+
+    await Otp.deleteOne({ _id: otpDoc._id });
+
+    const user = await User.create({
+      name, phone, email, password, role,
+      isVerified: true,
+    });
     const token = generateToken(user._id);
 
     res.status(201).json({
       success: true,
       token,
-      user: { _id: user._id, name: user.name, phone: user.phone, role: user.role, isVerified: user.isVerified },
+      user: {
+        _id: user._id,
+        name: user.name,
+        phone: user.phone,
+        role: user.role,
+        isVerified: user.isVerified,
+      },
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// ── MSG91 widget flow (web widget AND mobile app widget) ─────────────────────
-// The client runs the OTP flow with MSG91 directly and gets back an access
-// token. The server never trusts a client-supplied phone: it verifies the token
-// with MSG91 (using the secret authkey) and takes the phone from MSG91's answer.
-const decodeJwtPayload = (t) => {
-  try { return JSON.parse(Buffer.from(String(t).split('.')[1], 'base64url').toString('utf8')); }
-  catch { return null; }
-};
-const to10 = (v) => {
-  const d = String(v ?? '').replace(/\D/g, '');
-  const n = d.length === 12 && d.startsWith('91') ? d.slice(2) : d;
-  return /^\d{10}$/.test(n) ? n : null;
-};
-
-async function phoneFromWidgetToken(accessToken) {
-  const fail = (status, message) => { const e = new Error(message); e.status = status; return e; };
-  if (typeof accessToken !== 'string' || !accessToken) throw fail(400, 'Missing verification token');
-  const authkey = String(process.env.MSG91_AUTHKEY || '').trim();   // a stray space/newline from copy-paste breaks it
-  if (!authkey) throw fail(500, 'Server is not configured for phone verification. Contact support.');
-
-  // Documented form first (api.msg91.com, authkey in the header); the older form (control host, authkey in body) as a fallback.
-  const attempts = [
-    () => axios.post('https://api.msg91.com/api/v5/widget/verifyAccessToken', { 'access-token': accessToken },
-      { headers: { authkey, 'Content-Type': 'application/json' }, timeout: 10000, validateStatus: () => true }),
-    () => axios.post('https://control.msg91.com/api/v5/widget/verifyAccessToken', { authkey, 'access-token': accessToken },
-      { timeout: 10000, validateStatus: () => true }),
-  ];
-  let data, lastErr;
-  for (const go of attempts) {
-    try {
-      const r = await go();
-      data = (r.data && typeof r.data === 'object') ? r.data : { type: 'error', message: `HTTP ${r.status}` };
-      if (data.type === 'success') break;
-    } catch (err) { lastErr = err; }
-  }
-  if (!data) {
-    console.error('MSG91 verify error:', lastErr?.message);
-    throw fail(502, 'Could not reach verification service. Please try again.');
-  }
-
-  if (data?.type !== 'success') {
-    console.error('MSG91 verifyAccessToken rejected:', JSON.stringify(data), `| server authkey: ${authkey.length} chars, starts "${authkey.slice(0, 6)}", ends "${authkey.slice(-4)}"`);
-    throw fail(400, `Phone verification failed: ${data?.message || 'unknown reason from MSG91'}`);
-  }
-
-  // Where MSG91 puts the verified number can vary: try the response, then the (already
-  // MSG91-validated) token's own payload. If none yields a phone we FAIL CLOSED.
-  const p = decodeJwtPayload(accessToken) || {};
-  const phone = [data.message, data.identifier, data.mobile, data.data?.identifier, data.data?.mobile,
-                 p.identifier, p.mobile, p.mobileNumber, p.phone, p.number]
-    .map(to10).find(Boolean);
-  if (!phone) {
-    console.error('MSG91 verify OK but no phone found. RAW:', JSON.stringify(data), 'TOKEN KEYS:', Object.keys(p));
-    throw fail(400, 'Could not read the verified phone number. Please contact support.');
-  }
-  return phone;
-}
-
-const widgetFailure = (res, err) =>
-  res.status(err.status || 500).json({ success: false, message: err.message });
-
+// ── OTP delivery (NEW — MSG91 widget flow) ───────────────────────────────────
+// The client-side widget (Msg91OtpWidget.jsx) handles sending/entering the
+// OTP entirely in its own popup, and hands back a verified access token.
+// This endpoint takes that token, verifies it SERVER-SIDE against MSG91
+// using the account authkey (never exposed to the browser), extracts the
+// MSG91-confirmed phone number, and only then creates the account.
+//
+// ⚠️ Confirm the exact response field name MSG91 returns the verified number
+// under (commonly `message`, sometimes nested) against your live dashboard
+// response before relying on this in production — test with a real OTP run
+// and console.log the raw response once to be certain.
 const verifyWidgetTokenAndRegister = async (req, res) => {
   try {
     const { accessToken, name, password, role, email } = req.body;
-    const phone = await phoneFromWidgetToken(accessToken);
 
-    if (await User.findOne({ phone })) {
+    if (!accessToken) {
+      return res.status(400).json({ success: false, message: 'Missing verification token' });
+    }
+    if (!process.env.MSG91_AUTHKEY) {
+      return res.status(500).json({ success: false, message: 'Server is not configured for phone verification. Contact support.' });
+    }
+
+    // ── Verify the token with MSG91 — this is the step that actually
+    // proves the OTP was really sent and really verified, not just trusted
+    // from the browser. ──
+    let verifiedPhone;
+    try {
+      const msgRes = await axios.post('https://control.msg91.com/api/v5/widget/verifyAccessToken', {
+        authkey: process.env.MSG91_AUTHKEY,
+        'access-token': accessToken,
+      });
+
+      if (msgRes.data?.type !== 'success') {
+        // Log the RAW response so we can see exactly what MSG91 said —
+        // this was previously silent, which is why the client only ever
+        // saw a generic "Phone verification failed" message.
+        console.error('MSG91 verifyAccessToken rejected:', JSON.stringify(msgRes.data));
+        return res.status(400).json({
+          success: false,
+          message: `Phone verification failed: ${msgRes.data?.message || 'unknown reason from MSG91'}`,
+        });
+      }
+
+      // MSG91 typically returns the verified identifier (often prefixed
+      // with country code, e.g. "9199XXXXXXXX") in `message`. Strip a
+      // leading "91" country code if present, to match this app's
+      // 10-digit phone storage format.
+      let raw = String(msgRes.data.message || '').trim();
+      verifiedPhone = raw.length === 12 && raw.startsWith('91') ? raw.slice(2) : raw;
+
+      if (!/^\d{10}$/.test(verifiedPhone)) {
+        console.error('MSG91 verify succeeded but phone could not be parsed. Raw response:', JSON.stringify(msgRes.data));
+        return res.status(400).json({ success: false, message: 'Could not read a valid verified phone number from MSG91.' });
+      }
+    } catch (msgErr) {
+      console.error('MSG91 verify error:', msgErr.response?.data || msgErr.message);
+      return res.status(502).json({ success: false, message: 'Could not reach verification service. Please try again.' });
+    }
+
+    // ── Now proceed exactly like the old register(), but using the
+    // SERVER-VERIFIED phone number — never a client-supplied one. ──
+    const existing = await User.findOne({ phone: verifiedPhone });
+    if (existing) {
       return res.status(400).json({ success: false, message: 'This number is already registered. Please login instead.' });
     }
     if (!name || !password || !role) {
       return res.status(400).json({ success: false, message: 'Name, password, and role are required' });
     }
-    if (!ALLOWED_ROLES.includes(role)) return res.status(400).json({ success: false, message: 'Choose whether you want work or want to hire' });
 
-    const user = await User.create({ name, phone, email, password, role, isVerified: true, ...workerFields(role, req.body) });
+    const user = await User.create({
+      name, phone: verifiedPhone, email, password, role,
+      isVerified: true,
+    });
     const token = generateToken(user._id);
+
     res.status(201).json({
-      success: true, token,
-      user: { _id: user._id, name: user.name, phone: user.phone, role: user.role, isVerified: user.isVerified },
+      success: true,
+      token,
+      user: {
+        _id: user._id,
+        name: user.name,
+        phone: user.phone,
+        role: user.role,
+        isVerified: user.isVerified,
+      },
     });
   } catch (error) {
-    widgetFailure(res, error);
-  }
-};
-
-// Forgot password via widget: token proves the phone; no OTP is stored on our side.
-const resetPasswordWithWidget = async (req, res) => {
-  try {
-    const { accessToken, newPassword } = req.body;
-    if (typeof newPassword !== 'string' || newPassword.length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
-    }
-    const phone = await phoneFromWidgetToken(accessToken);
-
-    const user = await User.findOne({ phone });
-    if (!user) return res.status(400).json({ success: false, message: 'No account found for this number.' });
-
-    user.password = newPassword;
-    user.loginAttempts = 0;
-    user.lockUntil = null;
-    await user.save();
-    res.status(200).json({ success: true, message: 'Password reset successfully. Please log in.' });
-  } catch (error) {
-    widgetFailure(res, error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -244,6 +246,8 @@ const login = async (req, res) => {
 
     const token = generateToken(user._id);
 
+    // Same profile fields the app needs right after login (photo, skill, city...), so the
+    // dashboard and menu show them straight away instead of only after a profile update.
     res.status(200).json({
       success: true,
       token,
@@ -253,6 +257,13 @@ const login = async (req, res) => {
         phone: user.phone,
         role: user.role,
         isVerified: user.isVerified,
+        profilePhoto: user.profilePhoto || '',
+        city: user.city,
+        area: user.area,
+        bio: user.bio,
+        languages: user.languages,
+        worker: user.worker,
+        poster: user.poster,
       },
     });
   } catch (error) {
@@ -269,66 +280,104 @@ const getMe = async (req, res) => {
   }
 };
 
-// Logged-in re-verification of the user's OWN number (phone comes from the token, not the body)
 const sendOTP = async (req, res) => {
   try {
-    const r = await sendOtp(req.user.phone, 'verify');
-    if (!r.sent) return res.status(429).json({ success: false, message: 'Please wait before requesting another OTP.' });
+    const { phone } = req.body;
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await User.findOneAndUpdate({ phone }, { otp: { code: otp, expiresAt } });
+
+    if (isTestMode()) {
+      console.log(`[TEST MODE] OTP for ${phone}: ${otp}`);
+      return res.status(200).json({ success: true, message: 'OTP sent (test mode)', otp_dev: otp });
+    }
+
     res.status(200).json({ success: true, message: 'OTP sent' });
   } catch (error) {
-    sendFailure(res, error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
 const verifyOTP = async (req, res) => {
   try {
-    const v = await verifyOtp(req.user.phone, 'verify', req.body.otp);
-    if (!v.ok) return res.status(400).json({ success: false, message: v.message });
-    await User.updateOne({ _id: req.user._id }, { $set: { isVerified: true } });
+    const { phone, otp } = req.body;
+    const user = await User.findOne({ phone });
+
+    if (!user || !user.otp || !user.otp.code) {
+      return res.status(400).json({ success: false, message: 'No OTP found. Request a new one.' });
+    }
+    if (user.otp.code !== otp) {
+      return res.status(400).json({ success: false, message: 'Invalid OTP' });
+    }
+    if (user.otp.expiresAt < Date.now()) {
+      return res.status(400).json({ success: false, message: 'OTP has expired. Request a new one.' });
+    }
+
+    user.isVerified = true;
+    user.otp = undefined;
+    await user.save();
+
     res.status(200).json({ success: true, message: 'Phone verified successfully!' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// ── Forgot password ──────────────────────────────────────────────────────────
-// Always answers the same way whether or not the number is registered.
+// ── Forgot password (NEW) ─────────────────────────────────────────────────
+// Same user.otp pattern as sendOTP/verifyOTP above, and the same
+// isTestMode() dev-console-log pattern as sendRegisterOtp above.
 const forgotPasswordSendOtp = async (req, res) => {
   try {
-    const phone = normalizePhone(req.body.phone);
-    if (!phone) return res.status(400).json({ success: false, message: 'Enter a valid 10-digit mobile number' });
+    const { phone } = req.body;
+    const user = await User.findOne({ phone });
 
-    const user = await User.findOne({ phone }).select('_id');
-    let sent;
-    if (user) {
-      try { sent = await sendOtp(phone, 'reset'); }
-      catch (e) { return sendFailure(res, e); }   // delivery problem is not account-specific, safe to report
+    // Deliberately vague either way — don't reveal whether a phone number
+    // is actually registered (basic enumeration-attack hygiene)
+    if (!user) {
+      return res.status(200).json({
+        success: true,
+        message: 'If that number is registered, an OTP has been sent.',
+      });
     }
-    res.status(200).json({ success: true, message: 'If that number is registered, an OTP has been sent.', otpLength: otpLength(), ...(sent?.devCode && { otp_dev: sent.devCode }) });
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    user.otp = { code, expiresAt };
+    await user.save();
+
+    if (isTestMode()) {
+      console.log(`[TEST MODE] Password reset OTP for ${phone}: ${code}`);
+      return res.status(200).json({ success: true, message: 'OTP sent (test mode)', otp_dev: code });
+    }
+
+    res.status(200).json({ success: true, message: 'OTP sent.' });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Could not send OTP' });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
 const resetPassword = async (req, res) => {
   try {
-    const phone = normalizePhone(req.body.phone);
-    const { otp, newPassword } = req.body;
+    const { phone, otp, newPassword } = req.body;
 
-    if (!phone) return res.status(400).json({ success: false, message: 'Enter a valid 10-digit mobile number' });
-    if (typeof newPassword !== 'string' || newPassword.length < 6) {
+    if (!newPassword || newPassword.length < 6) {
       return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
     }
 
     const user = await User.findOne({ phone });
-    if (!user) return res.status(400).json({ success: false, message: 'Invalid or expired OTP. Request a new one.' });
+    if (!user || !user.otp || !user.otp.code) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired OTP. Request a new one.' });
+    }
+    if (user.otp.code !== otp) {
+      return res.status(400).json({ success: false, message: 'Invalid OTP' });
+    }
+    if (user.otp.expiresAt < Date.now()) {
+      return res.status(400).json({ success: false, message: 'OTP has expired. Request a new one.' });
+    }
 
-    const v = await verifyOtp(phone, 'reset', otp);
-    if (!v.ok) return res.status(400).json({ success: false, message: v.message });
-
-    user.password = newPassword; // pre-save hook hashes it
-    user.loginAttempts = 0;
-    user.lockUntil = null;
+    user.password = newPassword; // pre-save hook hashes this automatically
+    user.otp = undefined;
     await user.save();
 
     res.status(200).json({ success: true, message: 'Password reset successfully. Please log in.' });
@@ -340,6 +389,5 @@ const resetPassword = async (req, res) => {
 module.exports = {
   register, login, getMe, sendOTP, verifyOTP, sendRegisterOtp,
   verifyWidgetTokenAndRegister,
-  forgotPasswordSendOtp, resetPassword, resetPasswordWithWidget,
-  _cleanSkills: cleanSkills,
+  forgotPasswordSendOtp, resetPassword,
 };

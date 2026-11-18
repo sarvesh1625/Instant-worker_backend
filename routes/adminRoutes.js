@@ -18,6 +18,7 @@ const {
 const { protect } = require('../middleware/auth');
 const { adminOnly } = require('../middleware/adminAuth');
 const { getSettings, toggleSubscriptions } = require('../controllers/platformSettingsController');
+const { adminGet: getWageGuide, adminSave: saveWageGuide } = require('../controllers/wageGuideController');
 // const {
 //   getAllPlansAdmin, createPlan, updatePlan, deactivatePlan, getAllSubscriptions, grantSubscription,
 // } = require('../controllers/adminSubscriptionController');
@@ -62,6 +63,10 @@ router.patch('/skills/:id',     updateSkill);
 router.delete('/skills/:id',    deleteSkill);
 router.get('/settings',              getSettings);
 router.patch('/settings/subscriptions', toggleSubscriptions);
+
+// Wage guide (usual daily pay per skill and city — a hint for posters)
+router.get('/wage-guide', getWageGuide);
+router.put('/wage-guide', saveWageGuide);
 
 router.get('/subscriptions/plans',      getAllPlansAdmin);
 router.post('/subscriptions/plans',     createPlan);

@@ -39,6 +39,44 @@ const getEarlyAccessContext = async (userId) => {
   return { enabled: true, delayMinutes: settings.earlyAccessMinutes, isSubscribed };
 };
 
+// ── Start time must not be in the past ─────────────────────────────────────
+// India only, so times are read as Indian time (UTC+5:30) whatever time zone the server runs in.
+// The app sends "Wed, 18 Nov" + "6:00 AM", the website sends "2026-11-18" + "06:00". Anything we
+// cannot read is let through (the apps check it too), so an odd typed value never blocks posting.
+const IST_MS = 330 * 60 * 1000;
+const MONTHS = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+const parseStartIST = (startDate, startTime) => {
+  const ds = String(startDate || '').trim();
+  if (!ds) return null;
+  const nowIst = Date.now() + IST_MS;
+  let y, mo, day;
+  let m = ds.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) { y = +m[1]; mo = +m[2] - 1; day = +m[3]; }
+  else {
+    m = ds.match(/(\d{1,2})\s*([A-Za-z]{3})/);
+    if (!m) return null;
+    mo = MONTHS.indexOf(m[2].toLowerCase());
+    if (mo < 0) return null;
+    day = +m[1];
+    y = new Date(nowIst).getUTCFullYear();
+    // a day and month with no year that is long past means next year (e.g. "2 Jan" typed in December)
+    if (Date.UTC(y, mo, day) < nowIst - 180 * 86400000) y += 1;
+  }
+  let h = 0, mi = 0, hasTime = false;
+  const ts = String(startTime || '').trim();
+  let tm = ts.match(/^(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?$/i);
+  if (tm) { h = (+tm[1]) % 12 + (/p/i.test(tm[3]) ? 12 : 0); mi = +(tm[2] || 0); hasTime = true; }
+  else if ((tm = ts.match(/^(\d{1,2}):(\d{2})$/))) { h = +tm[1]; mi = +tm[2]; hasTime = true; }
+  return { at: Date.UTC(y, mo, day, h, mi), dayStart: Date.UTC(y, mo, day), hasTime };
+};
+const startIsPast = (startDate, startTime) => {
+  const st = parseStartIST(startDate, startTime);
+  if (!st) return false;
+  const nowIst = Date.now() + IST_MS;
+  const todayStart = Math.floor(nowIst / 86400000) * 86400000;
+  return st.hasTime ? st.at < nowIst - 10 * 60 * 1000 : st.dayStart < todayStart;   // 10 minutes of grace
+};
+
 const createJob = async (req, res) => {
   try {
     // Payment rule: a poster with an unconfirmed worker payment cannot post.
@@ -53,6 +91,10 @@ const createJob = async (req, res) => {
     }
 
     const { title, skill, description, city, area, wage, workersNeeded, duration, startDate, startTime, jobType, urgentWithinHours, lat, lng, autoAccept } = req.body;
+
+    if ((jobType || 'regular') !== 'urgent' && startIsPast(startDate, startTime)) {
+      return res.status(400).json({ success: false, message: 'That start time has already passed. Please choose a later time.' });
+    }
 
     const location = { city, area };
     const latNum = parseFloat(lat);
